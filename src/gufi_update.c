@@ -38,7 +38,6 @@ static int print_callback(void *args, int count, char **data, char **columns) {
 	struct callback_args *ca = (struct callback_args *) args;
 	ca->found = 1;
 
-
 	FILE *out = ca->out;
 	const char *f = ca->format;
 
@@ -344,7 +343,7 @@ static int print_callback(void *args, int count, char **data, char **columns) {
 	return 0;
 }
 
-static void processNormal(beegfsEvent *event, const char *dbRoot) {
+static void processNormal(beegfs_event *event, const char *dbRoot) {
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
 	const char *table = NULL;
@@ -411,11 +410,77 @@ static void processNormal(beegfsEvent *event, const char *dbRoot) {
 	closedb(db);
 }
 
-static void processCreate(beegfsEvent *event, const char *dbRoot) {
+static void process_attr_update(beegfs_event *event, const char *db_root, const char *beegfs_root) {
+	char file_path[MAXPATH];
+	char db_path[MAXPATH];
+	char beegfs_path[MAXPATH];
+	SNPRINTF(beegfs_path, sizeof(beegfs_path), "%s%s", beegfs_root, event->path);
+	SNPRINTF(file_path, sizeof(file_path), "%s%s", db_root, event->path);
+	struct stat st;
+	/* path is directory */
+	if ((lstat(file_path, &st) == 0) && S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "not supported\n");
+	}
+	/*
+	 * path does exist:    path is in the filesystem the index is on,
+	 *                     rather than in the index (e.g. db.db)
+	 *
+	 * path doesn't exist: path is a file/link name that might exist
+	 *                     within the index
+	 *
+	 * either way, search index at dirname(path)
+	 */
+	else {
+		if ((lstat(beegfs_path, &st) == 0) && S_ISDIR(st.st_mode)) {
+			fprintf(stderr, "not supported\n");
+		}
+
+		/* remove basename from the path */
+		char parent[MAXPATH];
+		char name[MAXPATH];
+		shortpath(file_path, parent, name);
+		SNPRINTF(db_path, sizeof(db_path), "%s/" DBNAME, parent);
+		sqlite3 *db = opendb(db_path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, NULL, NULL);
+
+		sqlite3_stmt *stmt;
+		const char *sql =
+				"UPDATE entries SET size = ?, blocks = ?, blksize = ?, inode = ?, nlink = ?, mode = ?, uid = ?, gid = ?, atime = ?, mtime = ?, ctime = ? WHERE name = ?;";
+		int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+		if (rc != SQLITE_OK) {
+			fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+		}
+		sqlite3_bind_int64(stmt, 1, st.st_size);
+		sqlite3_bind_int64(stmt, 2, st.st_blocks);
+		sqlite3_bind_int64(stmt, 3, st.st_blksize);
+		char *zino = sqlite3_mprintf("%" PRIu64, st.st_ino);
+		sqlite3_bind_text(stmt, 4, zino, -1, SQLITE_STATIC);
+		sqlite3_bind_int64(stmt, 5, st.st_nlink);
+		sqlite3_bind_int64(stmt, 6, st.st_mode);
+		sqlite3_bind_int64(stmt, 7, st.st_uid);
+		sqlite3_bind_int64(stmt, 8, st.st_gid);
+		sqlite3_bind_int64(stmt, 9, st.st_atime);
+		sqlite3_bind_int64(stmt, 10, st.st_mtime);
+		sqlite3_bind_int64(stmt, 11, st.st_ctime);
+		sqlite3_bind_text(stmt, 12, name, -1,SQLITE_STATIC);
+
+		rc = sqlite3_step(stmt);
+		if (rc != SQLITE_DONE) {
+			fprintf(stderr, "Failed to update user name: %s\n", sqlite3_errmsg(db));
+		} else {
+			printf("User name updated successfully, st.st_ino %llu, %s\n", st.st_ino, zino);
+		}
+
+		sqlite3_free(zino);
+		sqlite3_finalize(stmt);
+		closedb(db_path);
+	}
+}
+
+static void processCreate(beegfs_event *event, const char *db_root) {
 	printf("Create event\n");
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
-	SNPRINTF(filePath, sizeof(filePath), "%s%s", dbRoot, event->path);
+	SNPRINTF(filePath, sizeof(filePath), "%s%s", db_root, event->path);
 	struct stat st;
 	/* path is directory */
 	if ((lstat(filePath, &st) == 0) && S_ISDIR(st.st_mode)) {
@@ -506,7 +571,7 @@ static void processCreate(beegfsEvent *event, const char *dbRoot) {
 }
 
 
-static void processUnlink(beegfsEvent *event, const char *db_root) {
+static void processUnlink(beegfs_event *event, const char *db_root) {
 	printf("Create event\n");
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
@@ -573,7 +638,7 @@ static void processUnlink(beegfsEvent *event, const char *db_root) {
 	}
 }
 
-static void processEvent(beegfsEvent *event, const char *dbRoot) {
+static void processEvent(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	printf("Entry ID: %s\n", event->entryId);
 	printf("Parent Entry ID: %s\n", event->parentEntryId);
 	printf("Path: %s\n", event->path);
@@ -588,19 +653,22 @@ static void processEvent(beegfsEvent *event, const char *dbRoot) {
 
 	switch (event->type) {
 		case FLUSH:
-			printf("Flush event\n");
+			printf("Flush event, ignore it, change will be applied on CLOSE_WRITE\n");
 			break;
 		case TRUNCATE:
 			printf("Truncate event\n");
+			process_attr_update(event, db_root, beegfs_root);
 			break;
 		case SETATTR:
 			printf("Set attribute event\n");
+			process_attr_update(event, db_root, beegfs_root);
 			break;
 		case CLOSE_WRITE:
 			printf("Close write event\n");
+			process_attr_update(event, db_root, beegfs_root);
 			break;
 		case CREATE:
-			return processCreate(event, dbRoot);
+			return processCreate(event, db_root);
 		case MKDIR:
 			printf("Mkdir event\n");
 			break;
@@ -615,7 +683,7 @@ static void processEvent(beegfsEvent *event, const char *dbRoot) {
 			break;
 		case UNLINK:
 			printf("Unlink event\n");
-			return processUnlink(event, dbRoot);
+			return processUnlink(event, db_root);
 		case HARDLINK:
 			printf("Hardlink event\n");
 			break;
@@ -623,17 +691,17 @@ static void processEvent(beegfsEvent *event, const char *dbRoot) {
 			printf("Rename event\n");
 			break;
 		case READ:
-			printf("Read event\n");
+			printf("Read event, ignore it, change will be applied on CLOSE_WRITE\n");
 			break;
 		default:
 			sprintf(stderr, "Unknown event type: %d\n", event->type);
 	}
 
-	return processNormal(event, dbRoot);
+	return processNormal(event, db_root);
 }
 
-int startServer(const char *address, int port, const char *dbRoot) {
-	fprintf(stdout, "Creating GUFI Index %s with %d threads\n", dbRoot, 1);
+int startServer(const char *address, int port, const char *db_root, const char *beegfs_root) {
+	fprintf(stdout, "Creating GUFI Index %s with %d threads\n", db_root, 1);
 	int server_fd, client_fd;
 	struct sockaddr_in server_addr, client_addr;
 	socklen_t client_addr_len = sizeof(client_addr);
@@ -679,11 +747,11 @@ int startServer(const char *address, int port, const char *dbRoot) {
 
 	ssize_t bytes_received;
 	while ((bytes_received = recv(client_fd, buffer, MAX_BUFFER_SIZE, 0)) > 0) {
-		beegfsEvent event;
+		beegfs_event event;
 		ReadErrorCode status = rawToPacket(buffer, bytes_received, &event);
 
 		if (status == Success) {
-			processEvent(&event, dbRoot);
+			processEvent(&event, db_root, beegfs_root);
 		} else {
 			printf("Packet parsing error: %d\n", status);
 		}
@@ -703,13 +771,14 @@ int startServer(const char *address, int port, const char *dbRoot) {
 }
 
 int main(int argc, char *argv[]) {
-	if (argc < 3) {
-		fprintf(stderr, "Usage: %s <port> <GUFI index root path>\n", argv[0]);
+	if (argc < 4) {
+		fprintf(stderr, "Usage: %s <port> <GUFI index root path> <BeeGFS mountpoint>\n", argv[0]);
 		return 1;
 	}
 	int port = argv[1] ? atoi(argv[1]) : 6000;
 	const char *path = argv[2] ? argv[2] : "";
+	const char *beegfs_root = argv[3] ? argv[3] : "";
 
-	startServer("0.0.0.0", port, path);
+	startServer("0.0.0.0", port, path, beegfs_root);
 	return 0;
 }

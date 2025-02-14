@@ -45,13 +45,13 @@ typedef struct {
 	char path[256];
 	char targetPath[256];
 	char targetParentId[256];
-} beegfsEvent;
+} beegfs_event;
 
 typedef struct {
 	const char *position;
 	const char *end;
 } Reader;
 
-ReadErrorCode rawToPacket(const char *data, size_t bytesRead, beegfsEvent *res);
+ReadErrorCode rawToPacket(const char *data, size_t bytesRead, beegfs_event *res);
 
 #endif //BEEGFS_H

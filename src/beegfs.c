@@ -30,7 +30,7 @@ void read_string(Reader *reader, char *buffer, size_t max_len) {
 	reader->position += len + 1;
 }
 
-ReadErrorCode rawToPacket(const char *data, size_t bytesRead, beegfsEvent *res) {
+ReadErrorCode rawToPacket(const char *data, size_t bytesRead, beegfs_event *res) {
 	Reader reader = {data, data + bytesRead};
 
 	res->formatVersionMajor = READ_RAW(&reader, uint16_t);
