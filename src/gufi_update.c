@@ -14,6 +14,9 @@
 #include <pwd.h>
 #include <trace.h>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <libgen.h>
+#include <stdbool.h>
 
 static const char DEFAULT_FORMAT[] = "  File: %N\n"
 		"  Size: %-15s Blocks: %-10b IO Block: %-6o %F\n"
@@ -504,6 +507,7 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 		SNPRINTF(beegfs_path, sizeof(beegfs_path), "%s%s", beegfs_root, event->path);
 		shortpath(filePath, parent, name);
 		SNPRINTF(dbPath, sizeof(dbPath), "%s/" DBNAME, parent);
+		fprintf(stdout, "should process_create %s to database: %s, parent %s\n", filePath, dbPath, parent);
 
 		sqlite3 *db = opendb(dbPath, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, NULL, NULL);
 
@@ -582,7 +586,7 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 }
 
 static void process_unlink(beegfs_event *event, const char *db_root) {
-	printf("Create event\n");
+	printf("process_unlink event\n");
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
 	SNPRINTF(filePath, sizeof(filePath), "%s%s", db_root, event->path);
@@ -606,7 +610,7 @@ static void process_unlink(beegfs_event *event, const char *db_root) {
 		char name[MAXPATH];
 		shortpath(filePath, parent, name);
 		SNPRINTF(dbPath, sizeof(dbPath), "%s/" DBNAME, parent);
-		fprintf(stdout, "should add %s to database: %s, parent %s\n", filePath, dbPath, parent);
+		fprintf(stdout, "should process_unlink %s to database: %s, parent %s\n", filePath, dbPath, parent);
 
 		sqlite3 *db = opendb(dbPath, SQLITE_OPEN_READWRITE, 0, 0, NULL, NULL);
 
@@ -776,6 +780,102 @@ static void process_mkdir(beegfs_event *event, const char *db_root, const char *
 	}
 }
 
+static void process_rename(beegfs_event *event, const char *db_root, const char *beegfs_root) {
+	char source_path[MAXPATH], dest_path[MAXPATH];
+	char source_index_path[MAXPATH], dest_index_path[MAXPATH];
+	SNPRINTF(source_index_path, sizeof(source_index_path), "%s%s", db_root, event->path);
+	SNPRINTF(dest_index_path, sizeof(dest_index_path), "%s%s", db_root, event->targetPath);
+	SNPRINTF(source_path, sizeof(source_path), "%s%s", beegfs_root, event->path);
+	SNPRINTF(dest_path, sizeof(dest_path), "%s%s", beegfs_root, event->targetPath);
+	fprintf(stderr, "rename event: %s -> %s\n", source_path, dest_path);
+
+	struct stat st;
+	int rc = lstat(dest_path, &st);
+	if (rc != 0) {
+		fprintf(stderr, "Failed to stat \"%s\": %s\n", dest_path, strerror(errno));
+		return;
+	}
+
+	char old_parent[MAXPATH], new_parent[MAXPATH];
+	char new_name[MAXPATH], old_name[MAXPATH];
+	char old_db_prefix[MAXPATH], new_db_prefix[MAXPATH];
+	char old_db_path[MAXPATH], new_db_path[MAXPATH];
+	shortpath(dest_path, old_parent, new_name);
+	shortpath(source_path, new_parent, old_name);
+	shortpath(source_index_path, old_db_prefix, old_name);
+	shortpath(dest_index_path, new_db_prefix, new_name);
+	SNPRINTF(old_db_path, sizeof(old_db_path), "%s/%s", old_db_prefix, DBNAME);
+	SNPRINTF(new_db_path, sizeof(new_db_path), "%s/%s", new_db_prefix, DBNAME);
+	bool same_parent = strcmp(old_parent, new_parent) == 0;
+
+	/*
+	 * move directory from source path to dest path
+	 * 1. update related summary table for their parent directory.
+	 * 2. do directory movement in index dir too
+	 */
+	if (S_ISDIR(st.st_mode)) {
+		fprintf(stdout, "source_index_path %s dest_index_path%s \n", source_index_path, dest_index_path);
+		rc = rename(source_index_path, dest_index_path);
+		if (rc != 0) {
+			fprintf(stderr, "failed to do rename in index directory, error: rc %d\n", rc);
+		}
+	}
+	/*
+	 * rename file from source path to dest path
+	 * 1. in same directory, just rename the name in database;
+	 * 2. in different directory, delete the source path in database and insert the dest path in database.
+	 */
+	else {
+		if (same_parent) {
+			printf("rename in the same directory\n");
+			sqlite3 *db = opendb(new_db_path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, NULL, NULL);
+			const char *sql = "UPDATE entries SET name = ? WHERE name = ?;";
+			sqlite3_stmt *stmt;
+
+			rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+			if (rc != SQLITE_OK) {
+				fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+				return;
+			}
+
+			// Bind parameters
+			sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+			sqlite3_bind_text(stmt, 2, old_name, -1, SQLITE_STATIC);
+
+			// Execute the statement
+			rc = sqlite3_step(stmt);
+			if (rc != SQLITE_DONE) {
+				fprintf(stderr, "Failed to execute update: %s\n", sqlite3_errmsg(db));
+			} else {
+				printf("Update successful: %s -> %s\n", old_name, new_name);
+			}
+
+			// Finalize the statement
+			sqlite3_finalize(stmt);
+			sqlite3_close(new_db_path);
+		}
+		/*
+		 * 1. do unlink for old database
+		 * 2. do create for new database
+		 */
+		else {
+			beegfs_event unlink_event = {
+				.type = UNLINK,
+			};
+			strcpy(unlink_event.path, event->path);
+			beegfs_event create_event = {
+				.type = CREATE,
+			};
+			strcpy(create_event.path, event->targetPath);
+
+			fprintf(stderr, "rename in different directory, %s %s %s, %s\n", unlink_event.path, create_event.path,
+						(&unlink_event)->path, (&create_event)->path);
+			process_unlink(&unlink_event, db_root);
+			process_create(&create_event, db_root, beegfs_root);
+		}
+	}
+}
+
 static void process_event(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	printf("Entry ID: %s\n", event->entryId);
 	printf("Parent Entry ID: %s\n", event->parentEntryId);
@@ -826,7 +926,7 @@ static void process_event(beegfs_event *event, const char *db_root, const char *
 			return process_create(event, db_root, beegfs_root);
 		case RENAME:
 			printf("Rename event\n");
-			break;
+			return process_rename(event, db_root, beegfs_root);
 		case READ:
 			printf("Read event, ignore it, change will be applied on CLOSE_WRITE\n");
 			break;
