@@ -11,15 +11,15 @@ memcpy(&value, (reader)->position, sizeof(type)); \
 value; \
 })
 
-uint32_t read_u32(Reader *reader) {
+uint32_t read_u32(beegfs_reader *reader) {
 	return READ_RAW(reader, uint32_t);;
 }
 
-uint64_t read_u64(Reader *reader) {
+uint64_t read_u64(beegfs_reader *reader) {
 	return READ_RAW(reader, uint64_t);
 }
 
-void read_string(Reader *reader, char *buffer, size_t max_len) {
+void read_string(beegfs_reader *reader, char *buffer, size_t max_len) {
 	uint32_t len = read_u32(reader);
 	if (reader->position + len > reader->end || len >= max_len) {
 		fprintf(stderr, "String read error: exceeds buffer\n");
@@ -30,8 +30,8 @@ void read_string(Reader *reader, char *buffer, size_t max_len) {
 	reader->position += len + 1;
 }
 
-ReadErrorCode rawToPacket(const char *data, size_t bytesRead, beegfs_event *res) {
-	Reader reader = {data, data + bytesRead};
+ReadErrorCode raw_to_packet(const char *data, size_t bytesRead, beegfs_event *res) {
+	beegfs_reader reader = {data, data + bytesRead};
 
 	res->formatVersionMajor = READ_RAW(&reader, uint16_t);
 	res->formatVersionMinor = READ_RAW(&reader, uint16_t);
@@ -48,7 +48,7 @@ ReadErrorCode rawToPacket(const char *data, size_t bytesRead, beegfs_event *res)
 
 	res->droppedSeq = read_u64(&reader);
 	res->missedSeq = read_u64(&reader);
-	res->type = READ_RAW(&reader, FileEventType);
+	res->type = READ_RAW(&reader, beegfs_event_type);
 
 	read_string(&reader, res->entryId, sizeof(res->entryId));
 	read_string(&reader, res->parentEntryId, sizeof(res->parentEntryId));

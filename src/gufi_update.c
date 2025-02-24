@@ -12,6 +12,7 @@
 #include <utils.h>
 #include <grp.h>
 #include <pwd.h>
+#include <trace.h>
 #include <sys/time.h>
 
 static const char DEFAULT_FORMAT[] = "  File: %N\n"
@@ -343,7 +344,7 @@ static int print_callback(void *args, int count, char **data, char **columns) {
 	return 0;
 }
 
-static void processNormal(beegfs_event *event, const char *dbRoot) {
+static void process_normal(beegfs_event *event, const char *dbRoot) {
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
 	const char *table = NULL;
@@ -472,11 +473,11 @@ static void process_attr_update(beegfs_event *event, const char *db_root, const 
 
 		sqlite3_free(zino);
 		sqlite3_finalize(stmt);
-		closedb(db_path);
+		closedb(db);
 	}
 }
 
-static void processCreate(beegfs_event *event, const char *db_root) {
+static void process_create(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	printf("Create event\n");
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
@@ -499,6 +500,8 @@ static void processCreate(beegfs_event *event, const char *db_root) {
 		/* remove basename from the path */
 		char parent[MAXPATH];
 		char name[MAXPATH];
+		char beegfs_path[MAXPATH];
+		SNPRINTF(beegfs_path, sizeof(beegfs_path), "%s%s", beegfs_root, event->path);
 		shortpath(filePath, parent, name);
 		SNPRINTF(dbPath, sizeof(dbPath), "%s/" DBNAME, parent);
 
@@ -519,6 +522,9 @@ static void processCreate(beegfs_event *event, const char *db_root) {
 		}
 		sqlite3_finalize(stmt_summary);
 
+		if ((lstat(beegfs_path, &st) == 0) && S_ISDIR(st.st_mode)) {
+			fprintf(stderr, "not supported\n");
+		}
 
 		/* INSERT statement bindings into db.db */
 		// TODO: only insert entries table for now
@@ -527,25 +533,23 @@ static void processCreate(beegfs_event *event, const char *db_root) {
 		//sqlite3_stmt *xattr_files_res = insertdbprep(db, EXTERNAL_DBS_PWD_INSERT);  /* per-user and per-group db file names */
 
 		startdb(db);
-		struct timeval tv;
-		gettimeofday(&tv, NULL);
-		long long timestamp = (long long) tv.tv_sec;
+
 
 		struct stat ds = {
-			.st_ino = 0,
-			.st_nlink = 1,
-			.st_uid = 0,
-			.st_gid = 0,
-			.st_size = 0,
-			.st_blksize = 524288,
-			.st_blocks = 0,
-			.st_atime = timestamp,
-			.st_mtim = timestamp,
-			.st_ctime = timestamp,
-			.st_mode = 33188,
+			.st_ino = st.st_ino,
+			.st_nlink = st.st_nlink,
+			.st_uid = st.st_uid,
+			.st_gid = st.st_gid,
+			.st_size = st.st_size,
+			.st_blksize = st.st_blksize,
+			.st_blocks = st.st_blocks,
+			.st_atime = st.st_atime,
+			.st_mtim = st.st_mtime,
+			.st_ctime = st.st_ctime,
+			.st_mode = st.st_mode,
 		};
+
 		struct entry_data row_ed = {
-			.type = 'f',
 			.statuso = ds,
 			.linkname = "",
 			.xattrs = NULL,
@@ -557,21 +561,27 @@ static void processCreate(beegfs_event *event, const char *db_root) {
 			.osstext1 = "",
 			.osstext2 = "",
 		};
+
+		if (S_ISREG(st.st_mode)) {
+			row_ed.type = 'f';
+		}
+		if (S_ISLNK(st.st_mode)) {
+			row_ed.type = 'l';
+		}
+
 		struct work *row = new_work_with_name("", 0, name, strlen(name));
 		// FIXME: this is a hack, should set the correct values within new_work_with_name instead of set them here
 		row->basename_len = strlen(name);
 		row->name = name;
 		row->name_len = strlen(name);
 		insertdbgo(row, &row_ed, entries_res);
-		fprintf(stdout, "inserted file %s, time %lld\n", name, timestamp);
 		free(row);
 		stopdb(db);
 		closedb(db); /* don't set to nullptr */
 	}
 }
 
-
-static void processUnlink(beegfs_event *event, const char *db_root) {
+static void process_unlink(beegfs_event *event, const char *db_root) {
 	printf("Create event\n");
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
@@ -638,7 +648,135 @@ static void processUnlink(beegfs_event *event, const char *db_root) {
 	}
 }
 
-static void processEvent(beegfs_event *event, const char *db_root, const char *beegfs_root) {
+static void process_rmdir(beegfs_event *event, const char *db_root, const char *beegfs_root) {
+	char file_path[MAXPATH];
+	char db_path[MAXPATH];
+	char beegfs_path[MAXPATH];
+	SNPRINTF(beegfs_path, sizeof(beegfs_path), "%s%s", beegfs_root, event->path);
+	SNPRINTF(file_path, sizeof(file_path), "%s%s", db_root, event->path);
+	fprintf(stderr, "process_rmdir %s\n", file_path);
+
+	DIR *dir = opendir(file_path);
+	if (!dir) {
+		perror("Failed to open directory");
+		return;
+	}
+
+	struct dirent *entry;
+
+	while ((entry = readdir(dir)) != NULL) {
+		// Skip the current directory and parent directory entries
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+			continue;
+
+		if (strcmp(entry->d_name, "db.db") != 0) {
+			fprintf(stderr, "directory is not empty\n");
+			break;
+		}
+
+		char fullpath[PATH_MAX];
+		snprintf(fullpath, sizeof(fullpath), "%s/%s", file_path, entry->d_name);
+		if (unlink(fullpath) == -1) {
+			fprintf(stderr, "Failed to remove file \"%s\": %s\n", fullpath, strerror(errno));
+		} else {
+			printf("Removed file: %s\n", fullpath);
+		}
+	}
+	closedir(dir);
+
+	if (rmdir(file_path) == -1) {
+		fprintf(stderr, "Failed to remove directory \"%s\": %s\n", file_path, strerror(errno));
+		// If the directory is not empty or an error occurs, it is kept
+	} else {
+		printf("Removed empty directory: %s\n", file_path);
+	}
+}
+
+static void process_mkdir(beegfs_event *event, const char *db_root, const char *beegfs_root) {
+	char db_path[MAXPATH];
+	SNPRINTF(db_path, sizeof(db_path), "%s%s", db_root, event->path);
+
+	char beegfs_path[MAXPATH];
+	SNPRINTF(beegfs_path, sizeof(beegfs_path), "%s%s", beegfs_root, event->path);
+
+
+	struct stat st;
+	lstat(beegfs_path, &st);
+	if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "not a directory\n");
+		return;
+	}
+
+	int rc = mkdir(db_path, 0777);
+	if (rc != 0) {
+		fprintf(stderr, "Failed to create directory \"%s\": %s\n", db_path, strerror(errno));
+	}
+
+	struct stat ds = {
+		.st_ino = st.st_ino,
+		.st_nlink = st.st_nlink,
+		.st_uid = st.st_uid,
+		.st_gid = st.st_gid,
+		.st_size = st.st_size,
+		.st_blksize = st.st_blksize,
+		.st_blocks = st.st_blocks,
+		.st_atime = st.st_atime,
+		.st_mtim = st.st_mtime,
+		.st_ctime = st.st_ctime,
+		.st_mode = st.st_mode,
+	};
+
+	struct entry_data row_ed = {
+		.type = 'd',
+		.statuso = ds,
+		.linkname = "",
+		.xattrs = NULL,
+		.crtime = 0,
+		.ossint1 = 0,
+		.ossint2 = 0,
+		.ossint3 = 0,
+		.ossint4 = 0,
+		.osstext1 = "",
+		.osstext2 = "",
+	};
+
+	char dbPath[MAXPATH];
+	SNPRINTF(dbPath, sizeof(dbPath), "%s/%s", db_path, DBNAME);
+	fprintf(stderr, "new db_path: %s\n", dbPath);
+	sqlite3 *db = opendb(dbPath, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, create_dbdb_tables, NULL);
+	if (db) {
+		struct sum summary;
+		zeroit(&summary);
+
+		sll_t xattr_db_list;
+		sll_init(&xattr_db_list);
+
+		/* INSERT statement bindings into db.db */
+		sqlite3_stmt *entries_res = insertdbprep(db, ENTRIES_INSERT); /* entries */
+		sqlite3_stmt *xattrs_res = insertdbprep(db, XATTRS_PWD_INSERT); /* xattrs within db.db */
+		sqlite3_stmt *xattr_files_res = insertdbprep(db, EXTERNAL_DBS_PWD_INSERT);
+		/* per-user and per-group db file names */
+
+		startdb(db);
+
+		stopdb(db);
+		/* write out per-user and per-group xattrs */
+		sll_destroy(&xattr_db_list, destroy_xattr_db);
+
+		/* write out the current directory's xattrs */
+		insertdbgo_xattrs_avail(&row_ed, xattrs_res);
+
+		/* write out data going into db.db */
+		insertdbfin(xattr_files_res); /* per-user and per-group xattr db file names */
+		insertdbfin(xattrs_res);
+		insertdbfin(entries_res);
+
+		xattrs_cleanup(&row_ed.xattrs);
+		closedb(db); /* don't set to nullptr */
+	}
+}
+
+static void process_event(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	printf("Entry ID: %s\n", event->entryId);
 	printf("Parent Entry ID: %s\n", event->parentEntryId);
 	printf("Path: %s\n", event->path);
@@ -668,25 +806,24 @@ static void processEvent(beegfs_event *event, const char *db_root, const char *b
 			process_attr_update(event, db_root, beegfs_root);
 			break;
 		case CREATE:
-			return processCreate(event, db_root);
+			return process_create(event, db_root, beegfs_root);
 		case MKDIR:
-			printf("Mkdir event\n");
-			break;
+			return process_mkdir(event, db_root, beegfs_root);
 		case MKNOD:
 			printf("Mknod event\n");
-			break;
+			return process_create(event, db_root, beegfs_root);
 		case SYMLINK:
 			printf("Symlink event\n");
-			break;
+			return process_create(event, db_root, beegfs_root);
 		case RMDIR:
 			printf("Rmdir event\n");
-			break;
+			return process_rmdir(event, db_root, beegfs_root);
 		case UNLINK:
 			printf("Unlink event\n");
-			return processUnlink(event, db_root);
+			return process_unlink(event, db_root);
 		case HARDLINK:
 			printf("Hardlink event\n");
-			break;
+			return process_create(event, db_root, beegfs_root);
 		case RENAME:
 			printf("Rename event\n");
 			break;
@@ -696,11 +833,10 @@ static void processEvent(beegfs_event *event, const char *db_root, const char *b
 		default:
 			sprintf(stderr, "Unknown event type: %d\n", event->type);
 	}
-
-	return processNormal(event, db_root);
 }
 
-int startServer(const char *address, int port, const char *db_root, const char *beegfs_root) {
+
+int reveive_event(const char *address, int port, const char *db_root, const char *beegfs_root) {
 	fprintf(stdout, "Creating GUFI Index %s with %d threads\n", db_root, 1);
 	int server_fd, client_fd;
 	struct sockaddr_in server_addr, client_addr;
@@ -748,10 +884,10 @@ int startServer(const char *address, int port, const char *db_root, const char *
 	ssize_t bytes_received;
 	while ((bytes_received = recv(client_fd, buffer, MAX_BUFFER_SIZE, 0)) > 0) {
 		beegfs_event event;
-		ReadErrorCode status = rawToPacket(buffer, bytes_received, &event);
+		ReadErrorCode status = raw_to_packet(buffer, bytes_received, &event);
 
 		if (status == Success) {
-			processEvent(&event, db_root, beegfs_root);
+			process_event(&event, db_root, beegfs_root);
 		} else {
 			printf("Packet parsing error: %d\n", status);
 		}
@@ -779,6 +915,6 @@ int main(int argc, char *argv[]) {
 	const char *path = argv[2] ? argv[2] : "";
 	const char *beegfs_root = argv[3] ? argv[3] : "";
 
-	startServer("0.0.0.0", port, path, beegfs_root);
+	reveive_event("0.0.0.0", port, path, beegfs_root);
 	return 0;
 }

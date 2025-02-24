@@ -31,7 +31,7 @@ typedef enum {
 	HARDLINK = 10,
 	RENAME = 11,
 	READ = 12,
-} FileEventType;
+} beegfs_event_type;
 
 typedef struct {
 	uint16_t formatVersionMajor;
@@ -39,7 +39,7 @@ typedef struct {
 	uint32_t size;
 	uint64_t droppedSeq;
 	uint64_t missedSeq;
-	FileEventType type;
+	beegfs_event_type type;
 	char entryId[256];
 	char parentEntryId[256];
 	char path[256];
@@ -50,8 +50,8 @@ typedef struct {
 typedef struct {
 	const char *position;
 	const char *end;
-} Reader;
+} beegfs_reader;
 
-ReadErrorCode rawToPacket(const char *data, size_t bytesRead, beegfs_event *res);
+ReadErrorCode raw_to_packet(const char *data, size_t bytesRead, beegfs_event *res);
 
 #endif //BEEGFS_H
