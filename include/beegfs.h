@@ -1,14 +1,12 @@
 #ifndef BEEGFS_H
 #define BEEGFS_H
 
-
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <linux/limits.h>
 
-#define MAX_BUFFER_SIZE 1024
+// sizeof(beegfs_event) = 8992, should make sure buffer size > beegfs_event size
+#define MAX_BUFFER_SIZE (1024*1024*4)
 
 typedef enum {
 	Success,
@@ -42,8 +40,8 @@ typedef struct {
 	beegfs_event_type type;
 	char entryId[256];
 	char parentEntryId[256];
-	char path[256];
-	char targetPath[256];
+	char path[PATH_MAX];
+	char targetPath[PATH_MAX];
 	char targetParentId[256];
 } beegfs_event;
 

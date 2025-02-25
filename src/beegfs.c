@@ -1,5 +1,9 @@
 #include "beegfs.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #define READ_RAW(reader, type) ({ \
 type value; \
 if ((reader)->position + sizeof(type) > (reader)->end) { \
