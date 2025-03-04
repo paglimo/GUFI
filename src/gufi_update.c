@@ -292,7 +292,7 @@ static void process_mkdir(beegfs_event *event, const char *db_root, const char *
 		return;
 	}
 
-	int rc = mkdir(db_path, 0777);
+	int rc = mkdir(db_path, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
 	if (rc != 0) {
 		fprintf(stderr, "Failed to create directory \"%s\": %s\n", db_path, strerror(errno));
 	}
@@ -343,6 +343,16 @@ static void process_mkdir(beegfs_event *event, const char *db_root, const char *
 		insertdbfin(entries_res);
 
 		xattrs_cleanup(&row_ed.xattrs);
+
+		char parent[MAXPATH];
+		char name[MAXPATH];
+		shortpath(db_path, parent, name);
+		struct work *row = new_work_with_name("", 0, name, strlen(name));
+		row->basename_len = strlen(name);
+		row->name = name;
+		row->name_len = strlen(name);
+		row->pinode = st.st_ino;
+		insertsumdb(db, name, row, &row_ed, &summary);
 		closedb(db); /* don't set to nullptr */
 	}
 }
