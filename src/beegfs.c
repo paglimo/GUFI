@@ -34,21 +34,19 @@ void read_string(beegfs_reader *reader, char *buffer, size_t max_len) {
 	reader->position += len + 1;
 }
 
-ReadErrorCode raw_to_packet(const char *data, size_t bytesRead, beegfs_event *res) {
-	beegfs_reader reader = {data, data + bytesRead};
-
+ReadErrorCode phase_header(const char *data, beegfs_event *res) {
+	beegfs_reader reader = {data, data + EVENT_HEADER_SIZE};
 	res->formatVersionMajor = READ_RAW(&reader, uint16_t);
 	res->formatVersionMinor = READ_RAW(&reader, uint16_t);
 
 	if (res->formatVersionMajor != 1 || res->formatVersionMinor < 0)
 		return VersionMismatch;
-
 	res->size = read_u32(&reader);
+	return Success;
+}
 
-	if (res->size != bytesRead) {
-		fprintf(stderr, "Invalid size: %u - byteRead: %lu\n", res->size, bytesRead);
-		return InvalidSize;
-	}
+ReadErrorCode phase_body(const char *data, size_t body_size, beegfs_event *res) {
+	beegfs_reader reader = {data, data + body_size};
 
 	res->droppedSeq = read_u64(&reader);
 	res->missedSeq = read_u64(&reader);

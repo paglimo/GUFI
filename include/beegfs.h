@@ -8,6 +8,8 @@
 // sizeof(beegfs_event) = 8992, should make sure buffer size > beegfs_event size
 #define MAX_BUFFER_SIZE (1024*1024*4)
 
+#define EVENT_HEADER_SIZE 8
+
 typedef enum {
 	Success,
 	ReadFailed,
@@ -50,6 +52,7 @@ typedef struct {
 	const char *end;
 } beegfs_reader;
 
-ReadErrorCode raw_to_packet(const char *data, size_t bytesRead, beegfs_event *res);
+ReadErrorCode phase_header(const char *data, beegfs_event *res);
+ReadErrorCode phase_body(const char *data, size_t body_size, beegfs_event *res);
 
 #endif //BEEGFS_H

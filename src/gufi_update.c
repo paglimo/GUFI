@@ -141,23 +141,9 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 
 		startdb(db);
 
-
-		struct stat ds = {
-			.st_ino = st.st_ino,
-			.st_nlink = st.st_nlink,
-			.st_uid = st.st_uid,
-			.st_gid = st.st_gid,
-			.st_size = st.st_size,
-			.st_blksize = st.st_blksize,
-			.st_blocks = st.st_blocks,
-			.st_atime = st.st_atime,
-			.st_mtim = st.st_mtime,
-			.st_ctime = st.st_ctime,
-			.st_mode = st.st_mode,
-		};
-
 		struct entry_data row_ed = {
-			.statuso = ds,
+			.statuso = st,
+			.type = S_ISREG(st.st_mode) ? 'f' : S_ISLNK(st.st_mode) ? 'l' : '?',
 			.linkname = "",
 			.xattrs = NULL,
 			.crtime = 0,
@@ -168,13 +154,6 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 			.osstext1 = "",
 			.osstext2 = "",
 		};
-
-		if (S_ISREG(st.st_mode)) {
-			row_ed.type = 'f';
-		}
-		if (S_ISLNK(st.st_mode)) {
-			row_ed.type = 'l';
-		}
 
 		struct work *row = new_work_with_name("", 0, name, strlen(name));
 		// FIXME: this is a hack, should set the correct values within new_work_with_name instead of set them here
@@ -547,12 +526,22 @@ int reveive_event(const char *address, int port, const char *db_root, const char
 	printf("Connection established with client\n");
 
 	ssize_t bytes_received;
-	while ((bytes_received = recv(client_fd, buffer, MAX_BUFFER_SIZE, 0)) > 0) {
+	while ((bytes_received = recv(client_fd, buffer, EVENT_HEADER_SIZE, 0)) > 0) {
 		beegfs_event event;
-		ReadErrorCode status = raw_to_packet(buffer, bytes_received, &event);
-
+		ReadErrorCode status = phase_header(buffer, &event);
 		if (status == Success) {
-			process_event(&event, db_root, beegfs_root);
+			// receive the rest of the event
+			bytes_received = recv(client_fd, buffer, event.size - EVENT_HEADER_SIZE, 0);
+			if (bytes_received < 0) {
+				perror("Failed to receive message");
+				break;
+			}
+			status = phase_body(buffer, event.size - EVENT_HEADER_SIZE, &event);
+			if (status == Success) {
+				process_event(&event, db_root, beegfs_root);
+			} else {
+				perror("Failed to parse message");
+			}
 		} else {
 			printf("Packet parsing error: %d\n", status);
 		}
