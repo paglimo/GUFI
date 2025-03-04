@@ -161,6 +161,7 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 		row->name = name;
 		row->name_len = strlen(name);
 		insertdbgo(row, &row_ed, entries_res);
+		sqlite3_finalize(entries_res);
 		free(row);
 		stopdb(db);
 		closedb(db); /* don't set to nullptr */
@@ -353,6 +354,7 @@ static void process_mkdir(beegfs_event *event, const char *db_root, const char *
 		row->name_len = strlen(name);
 		row->pinode = st.st_ino;
 		insertsumdb(db, name, row, &row_ed, &summary);
+		free(row);
 		closedb(db); /* don't set to nullptr */
 	}
 }
