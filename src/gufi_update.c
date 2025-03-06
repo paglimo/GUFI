@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <external.h>
+#include <signal.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <utils.h>
@@ -16,6 +17,8 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+
+volatile sig_atomic_t stop_flag = 0;
 
 static void process_attr_update(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	char file_path[MAXPATH];
@@ -255,6 +258,7 @@ static void process_rmdir(beegfs_event *event, const char *db_root, const char *
 		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
 			continue;
 
+		// TODO: iterate over all files in the directory and remove them
 		if (strcmp(entry->d_name, "db.db") != 0) {
 			fprintf(stderr, "directory is not empty\n");
 			break;
@@ -491,7 +495,6 @@ static void process_event(beegfs_event *event, const char *db_root, const char *
 	}
 }
 
-
 int reveive_event(const char *address, int port, const char *db_root, const char *beegfs_root) {
 	fprintf(stdout, "Creating GUFI Index %s with %d threads\n", db_root, 1);
 	int server_fd, client_fd;
@@ -537,39 +540,44 @@ int reveive_event(const char *address, int port, const char *db_root, const char
 
 	printf("Connection established with client\n");
 
-	ssize_t bytes_received;
-	while ((bytes_received = recv(client_fd, buffer, EVENT_HEADER_SIZE, 0)) > 0) {
-		beegfs_event event;
-		ReadErrorCode status = phase_header(buffer, &event);
-		if (status == Success) {
-			// receive the rest of the event
-			bytes_received = recv(client_fd, buffer, event.size - EVENT_HEADER_SIZE, 0);
-			if (bytes_received < 0) {
-				perror("Failed to receive message");
-				break;
-			}
-			status = phase_body(buffer, event.size - EVENT_HEADER_SIZE, &event);
-			if (status == Success) {
-				process_event(&event, db_root, beegfs_root);
-			} else {
-				perror("Failed to parse message");
-			}
+	while (!stop_flag) {
+		ssize_t bytes_received = recv(client_fd, buffer, EVENT_HEADER_SIZE, 0);
+		if (bytes_received < 0) {
+			perror("Failed to receive message");
 		} else {
-			printf("Packet parsing error: %d\n", status);
+			beegfs_event event;
+			ReadErrorCode status = phase_header(buffer, &event);
+			if (status == Success) {
+				// receive the rest of the event
+				bytes_received = recv(client_fd, buffer, event.size - EVENT_HEADER_SIZE, 0);
+				if (bytes_received < 0) {
+					perror("Failed to receive message");
+					break;
+				}
+				status = phase_body(buffer, event.size - EVENT_HEADER_SIZE, &event);
+				if (status == Success) {
+					process_event(&event, db_root, beegfs_root);
+				} else {
+					perror("Failed to parse message");
+				}
+			} else {
+				printf("Packet parsing error: %d\n", status);
+			}
 		}
 
 		memset(buffer, 0, MAX_BUFFER_SIZE);
 	}
 
-	if (bytes_received < 0) {
-		perror("Failed to receive message");
-	} else {
-		printf("Client disconnected\n");
-	}
-
 	close(client_fd);
 	close(server_fd);
+	fprintf(stdout, "Server stopped\n");
+
 	return 1;
+}
+
+void signal_handler(int signum) {
+	printf("Caught signal %d\n", signum);
+	stop_flag = 1;
 }
 
 int main(int argc, char *argv[]) {
@@ -577,6 +585,14 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr, "Usage: %s <port> <GUFI index root path> <BeeGFS mountpoint>\n", argv[0]);
 		return 1;
 	}
+
+	struct sigaction sa;
+	sa.sa_handler = signal_handler;
+	sa.sa_flags = 0;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+
 	int port = argv[1] ? atoi(argv[1]) : 6000;
 	const char *path = argv[2] ? argv[2] : "";
 	const char *beegfs_root = argv[3] ? argv[3] : "";
