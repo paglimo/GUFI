@@ -7,8 +7,11 @@
 #include <stdint.h>
 #include <errno.h>
 #include <external.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <arpa/inet.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <utils.h>
 #include <grp.h>
@@ -17,8 +20,14 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <bits/fcntl-linux.h>
+
+#define MAX_EVENTS 1024
+#define LISTEN_BACKLOG 128
 
 volatile sig_atomic_t stop_flag = 0;
+int listen_fd, epoll_fd;
+char *db_root, *beegfs_root;
 
 static void process_attr_update(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	char file_path[MAXPATH];
@@ -28,7 +37,7 @@ static void process_attr_update(beegfs_event *event, const char *db_root, const 
 	SNPRINTF(file_path, sizeof(file_path), "%s%s", db_root, event->path);
 	struct stat st;
 	/* path is directory */
-	if ((lstat(file_path, &st) == 0) && S_ISDIR(st.st_mode)) {
+	if (lstat(file_path, &st) == 0 && S_ISDIR(st.st_mode)) {
 		fprintf(stderr, "not supported\n");
 	}
 	/*
@@ -41,7 +50,7 @@ static void process_attr_update(beegfs_event *event, const char *db_root, const 
 	 * either way, search index at dirname(path)
 	 */
 	else {
-		if ((lstat(beegfs_path, &st) == 0) && S_ISDIR(st.st_mode)) {
+		if (lstat(beegfs_path, &st) == 0 && S_ISDIR(st.st_mode)) {
 			fprintf(stderr, "not supported\n");
 		}
 
@@ -76,8 +85,6 @@ static void process_attr_update(beegfs_event *event, const char *db_root, const 
 		rc = sqlite3_step(stmt);
 		if (rc != SQLITE_DONE) {
 			fprintf(stderr, "Failed to update user name: %s\n", sqlite3_errmsg(db));
-		} else {
-			printf("User name updated successfully, st.st_ino %llu, %s\n", st.st_ino, zino);
 		}
 
 		sqlite3_free(zino);
@@ -87,13 +94,12 @@ static void process_attr_update(beegfs_event *event, const char *db_root, const 
 }
 
 static void process_create(beegfs_event *event, const char *db_root, const char *beegfs_root) {
-	printf("Create event\n");
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
 	SNPRINTF(filePath, sizeof(filePath), "%s%s", db_root, event->path);
 	struct stat st;
 	/* path is directory */
-	if ((lstat(filePath, &st) == 0) && S_ISDIR(st.st_mode)) {
+	if (lstat(filePath, &st) == 0 && S_ISDIR(st.st_mode)) {
 		fprintf(stderr, "not supported\n");
 	}
 	/*
@@ -113,7 +119,6 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 		SNPRINTF(beegfs_path, sizeof(beegfs_path), "%s%s", beegfs_root, event->path);
 		shortpath(filePath, parent, name);
 		SNPRINTF(dbPath, sizeof(dbPath), "%s/" DBNAME, parent);
-		fprintf(stdout, "should process_create %s to database: %s, parent %s\n", filePath, dbPath, parent);
 
 		sqlite3 *db = opendb(dbPath, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, NULL, NULL);
 
@@ -127,12 +132,10 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 		rc = sqlite3_step(stmt_summary);
 		if (rc != SQLITE_DONE) {
 			fprintf(stderr, "Execution failed: %s\n", sqlite3_errmsg(db));
-		} else {
-			printf("Updated size in summary table successfully.\n");
 		}
 		sqlite3_finalize(stmt_summary);
 
-		if ((lstat(beegfs_path, &st) == 0) && S_ISDIR(st.st_mode)) {
+		if (lstat(beegfs_path, &st) == 0 && S_ISDIR(st.st_mode)) {
 			fprintf(stderr, "not supported\n");
 		}
 
@@ -172,13 +175,12 @@ static void process_create(beegfs_event *event, const char *db_root, const char 
 }
 
 static void process_unlink(beegfs_event *event, const char *db_root) {
-	printf("process_unlink event\n");
 	char filePath[MAXPATH];
 	char dbPath[MAXPATH];
 	SNPRINTF(filePath, sizeof(filePath), "%s%s", db_root, event->path);
 	struct stat st;
 	/* path is directory */
-	if ((lstat(filePath, &st) == 0) && S_ISDIR(st.st_mode)) {
+	if (lstat(filePath, &st) == 0 && S_ISDIR(st.st_mode)) {
 		fprintf(stderr, "not supported\n");
 	}
 	/*
@@ -196,7 +198,6 @@ static void process_unlink(beegfs_event *event, const char *db_root) {
 		char name[MAXPATH];
 		shortpath(filePath, parent, name);
 		SNPRINTF(dbPath, sizeof(dbPath), "%s/" DBNAME, parent);
-		fprintf(stdout, "should process_unlink %s to database: %s, parent %s\n", filePath, dbPath, parent);
 
 		sqlite3 *db = opendb(dbPath, SQLITE_OPEN_READWRITE, 0, 0, NULL, NULL);
 
@@ -229,8 +230,6 @@ static void process_unlink(beegfs_event *event, const char *db_root) {
 		rc = sqlite3_step(stmt_summary);
 		if (rc != SQLITE_DONE) {
 			fprintf(stderr, "Execution failed: %s\n", sqlite3_errmsg(db));
-		} else {
-			printf("Updated size in summary table successfully.\n");
 		}
 
 		sqlite3_finalize(stmt_summary);
@@ -435,7 +434,7 @@ static void process_rename(beegfs_event *event, const char *db_root, const char 
 
 			// Finalize the statement
 			sqlite3_finalize(stmt);
-			sqlite3_close(new_db_path);
+			sqlite3_close(db);
 		}
 		/*
 		 * 1. do unlink for old database
@@ -495,89 +494,163 @@ static void process_event(beegfs_event *event, const char *db_root, const char *
 	}
 }
 
-int reveive_event(const char *address, int port, const char *db_root, const char *beegfs_root) {
-	fprintf(stdout, "Creating GUFI Index %s with %d threads\n", db_root, 1);
-	int server_fd, client_fd;
-	struct sockaddr_in server_addr, client_addr;
-	socklen_t client_addr_len = sizeof(client_addr);
-	char buffer[MAX_BUFFER_SIZE] = {0};
+void signal_handler(int signum) {
+	printf("Caught signal %d\n", signum);
+	stop_flag = 1;
+	close(listen_fd);
+	close(epoll_fd);
+}
 
-	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-		perror("Socket creation failed");
-		return 0;
+void set_nonblocking(int sockfd) {
+	int flags = fcntl(sockfd, F_GETFL, 0);
+	fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+}
+
+ssize_t recv_all(int sock, char *buffer, size_t length) {
+	ssize_t total_received = 0;
+	ssize_t bytes_received;
+
+	while (total_received < length) {
+		if (stop_flag) {
+			printf("Received stop signal, exiting recv_all()\n");
+			return -1;
+		}
+
+		bytes_received = recv(sock, buffer + total_received, length - total_received, 0);
+
+		if (bytes_received < 0) {
+			if (errno == EINTR) continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+			perror("recv failed");
+			return -1;
+		}
+		if (bytes_received == 0) return 0;
+
+		total_received += bytes_received;
 	}
+	return total_received;
+}
+
+void handle_client(int client_fd) {
+	char buffer[MAX_BUFFER_SIZE];
+
+	while (1) {
+		ssize_t bytes_received = recv(client_fd, buffer, EVENT_HEADER_SIZE, 0);
+		if (bytes_received < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+			perror("recv failed");
+			close(client_fd);
+			return;
+		}
+		if (bytes_received == 0) {
+			printf("Client disconnected: %d\n", client_fd);
+			epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+			close(client_fd);
+			return;
+		}
+
+		beegfs_event event;
+		ReadErrorCode status = phase_header(buffer, &event);
+		if (status != Success) {
+			printf("Packet parsing error: %d\n", status);
+			close(client_fd);
+			return;
+		}
+
+		bytes_received = recv_all(client_fd, buffer, event.size - EVENT_HEADER_SIZE);
+		if (bytes_received <= 0) {
+			close(client_fd);
+			return;
+		}
+
+		status = phase_body(buffer, event.size - EVENT_HEADER_SIZE, &event);
+		if (status == Success) {
+			process_event(&event, db_root, beegfs_root);
+		} else {
+			perror("Failed to parse message");
+		}
+	}
+}
+
+void *epoll_thread_func(void *arg) {
+	struct epoll_event events[MAX_EVENTS];
+
+	while (!stop_flag) {
+		int num_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, 5000);
+		if (num_fds < 0 && errno != EINTR) {
+			perror("epoll_wait failed");
+			break;
+		}
+
+		for (int i = 0; i < num_fds; i++) {
+			int fd = events[i].data.fd;
+
+			if (fd == listen_fd) {
+				struct sockaddr_in client_addr;
+				socklen_t client_addr_len = sizeof(client_addr);
+
+				while (1) {
+					int accepted_socket = accept(listen_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+					if (accepted_socket < 0) {
+						if (errno == EAGAIN || errno == EWOULDBLOCK) {
+							break;
+						}
+						perror("accept failed 1");
+						break;
+					}
+
+					set_nonblocking(accepted_socket);
+
+					struct epoll_event event;
+					event.events = EPOLLIN | EPOLLET;
+					event.data.fd = accepted_socket;
+					epoll_ctl(epoll_fd, EPOLL_CTL_ADD, accepted_socket, &event);
+				}
+			} else {
+				handle_client(fd);
+			}
+		}
+	}
+
+	return NULL;
+}
+
+int init_server(const char *address, int port) {
+	struct sockaddr_in server_addr;
+
+	listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (listen_fd < 0) {
+		perror("Socket creation failed");
+		return -1;
+	}
+
+	int opt = 1;
+	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+	set_nonblocking(listen_fd);
 
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_port = htons(port);
 	server_addr.sin_addr.s_addr = inet_addr(address);
 
-	int opt = 1;
-	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-		perror("Unable to set socket options");
-		close(server_fd);
-		return 0;
-	}
-
-	if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+	if (bind(listen_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
 		perror("Binding failed");
-		close(server_fd);
-		return 0;
+		close(listen_fd);
+		return -1;
 	}
 
-	if (listen(server_fd, 3) < 0) {
+	if (listen(listen_fd, LISTEN_BACKLOG) < 0) {
 		perror("Listen failed");
-		close(server_fd);
-		return 0;
+		close(listen_fd);
+		return -1;
 	}
 
-	printf("Server is listening on %s:%d...\n", address, port);
+	epoll_fd = epoll_create1(0);
+	struct epoll_event event;
+	event.events = EPOLLIN;
+	event.data.fd = listen_fd;
+	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
 
-	if ((client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len)) < 0) {
-		perror("Failed to accept connection");
-		close(server_fd);
-		return 0;
-	}
-
-	printf("Connection established with client\n");
-
-	while (!stop_flag) {
-		ssize_t bytes_received = recv(client_fd, buffer, EVENT_HEADER_SIZE, 0);
-		if (bytes_received < 0) {
-			perror("Failed to receive message");
-		} else {
-			beegfs_event event;
-			ReadErrorCode status = phase_header(buffer, &event);
-			if (status == Success) {
-				// receive the rest of the event
-				bytes_received = recv(client_fd, buffer, event.size - EVENT_HEADER_SIZE, 0);
-				if (bytes_received < 0) {
-					perror("Failed to receive message");
-					break;
-				}
-				status = phase_body(buffer, event.size - EVENT_HEADER_SIZE, &event);
-				if (status == Success) {
-					process_event(&event, db_root, beegfs_root);
-				} else {
-					perror("Failed to parse message");
-				}
-			} else {
-				printf("Packet parsing error: %d\n", status);
-			}
-		}
-
-		memset(buffer, 0, MAX_BUFFER_SIZE);
-	}
-
-	close(client_fd);
-	close(server_fd);
-	fprintf(stdout, "Server stopped\n");
-
-	return 1;
-}
-
-void signal_handler(int signum) {
-	printf("Caught signal %d\n", signum);
-	stop_flag = 1;
+	return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -586,6 +659,10 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	int port = atoi(argv[1]);
+	db_root = argv[2];
+	beegfs_root = argv[3];
+
 	struct sigaction sa;
 	sa.sa_handler = signal_handler;
 	sa.sa_flags = 0;
@@ -593,10 +670,14 @@ int main(int argc, char *argv[]) {
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
 
-	int port = argv[1] ? atoi(argv[1]) : 6000;
-	const char *path = argv[2] ? argv[2] : "";
-	const char *beegfs_root = argv[3] ? argv[3] : "";
+	if (init_server("0.0.0.0", port) < 0) {
+		return 1;
+	}
 
-	reveive_event("0.0.0.0", port, path, beegfs_root);
+	pthread_t epoll_thread;
+	pthread_create(&epoll_thread, NULL, epoll_thread_func, NULL);
+
+	pthread_join(epoll_thread, NULL);
+
 	return 0;
 }
