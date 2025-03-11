@@ -237,6 +237,42 @@ static void process_unlink(beegfs_event *event, const char *db_root) {
 	}
 }
 
+void delete_directory_recursive(const char *path) {
+	DIR *dir = opendir(path);
+	if (!dir) {
+		perror("opendir");
+		return;
+	}
+
+	struct dirent *entry;
+	char full_path[MAXPATH];
+
+	while ((entry = readdir(dir)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+
+		snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+		struct stat statbuf;
+		if (stat(full_path, &statbuf) == 0) {
+			if (S_ISDIR(statbuf.st_mode)) {
+				delete_directory_recursive(full_path);
+			} else {
+				if (remove(full_path) != 0) {
+					perror("remove file");
+				}
+			}
+		}
+	}
+
+	closedir(dir);
+
+	if (rmdir(path) != 0) {
+		perror("rmdir");
+	}
+}
+
 static void process_rmdir(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	char file_path[MAXPATH];
 	char db_path[MAXPATH];
@@ -245,40 +281,7 @@ static void process_rmdir(beegfs_event *event, const char *db_root, const char *
 	SNPRINTF(file_path, sizeof(file_path), "%s%s", db_root, event->path);
 	fprintf(stderr, "process_rmdir %s\n", file_path);
 
-	DIR *dir = opendir(file_path);
-	if (!dir) {
-		perror("Failed to open directory");
-		return;
-	}
-
-	struct dirent *entry;
-	while ((entry = readdir(dir)) != NULL) {
-		// Skip the current directory and parent directory entries
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-			continue;
-
-		// TODO: iterate over all files in the directory and remove them
-		if (strcmp(entry->d_name, "db.db") != 0) {
-			fprintf(stderr, "directory is not empty\n");
-			break;
-		}
-
-		char fullpath[PATH_MAX];
-		snprintf(fullpath, sizeof(fullpath), "%s/%s", file_path, entry->d_name);
-		if (unlink(fullpath) == -1) {
-			fprintf(stderr, "Failed to remove file \"%s\": %s\n", fullpath, strerror(errno));
-		} else {
-			printf("Removed file: %s\n", fullpath);
-		}
-	}
-	closedir(dir);
-
-	if (rmdir(file_path) == -1) {
-		fprintf(stderr, "Failed to remove directory \"%s\": %s\n", file_path, strerror(errno));
-		// If the directory is not empty or an error occurs, it is kept
-	} else {
-		printf("Removed empty directory: %s\n", file_path);
-	}
+	delete_directory_recursive(file_path);
 }
 
 static void process_mkdir(beegfs_event *event, const char *db_root, const char *beegfs_root) {
