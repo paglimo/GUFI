@@ -14,20 +14,87 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utils.h>
-#include <grp.h>
-#include <pwd.h>
 #include <trace.h>
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <stdbool.h>
 #include <bits/fcntl-linux.h>
+#include <pthread.h>
+
 
 #define MAX_EVENTS 1024
 #define LISTEN_BACKLOG 128
+#define NUM_WORKERS 1
+
+pthread_t workers[NUM_WORKERS];
+pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+
+typedef struct event_node {
+	beegfs_event event;
+	struct event_node *next;
+} event_node_t;
+
+event_node_t *event_queue_head = NULL;
+event_node_t *event_queue_tail = NULL;
 
 volatile sig_atomic_t stop_flag = 0;
 int listen_fd, epoll_fd;
 char *db_root, *beegfs_root;
+
+void enqueue_event(beegfs_event *event) {
+	event_node_t *new_node = malloc(sizeof(event_node_t));
+	if (!new_node) {
+		perror("malloc failed");
+		return;
+	}
+	memcpy(&new_node->event, event, sizeof(beegfs_event));
+	new_node->next = NULL;
+
+	pthread_mutex_lock(&queue_mutex);
+	if (event_queue_tail) {
+		event_queue_tail->next = new_node;
+	} else {
+		event_queue_head = new_node;
+	}
+	event_queue_tail = new_node;
+	pthread_cond_signal(&queue_cond);
+	pthread_mutex_unlock(&queue_mutex);
+}
+
+beegfs_event *dequeue_event() {
+	struct timespec ts;
+	pthread_mutex_lock(&queue_mutex);
+
+	while (!event_queue_head && !stop_flag) {
+		// Set a timeout to avoid indefinite blocking
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_sec += 1; // 1-second timeout
+
+		int res = pthread_cond_timedwait(&queue_cond, &queue_mutex, &ts);
+		if (res == ETIMEDOUT && stop_flag) {
+			pthread_mutex_unlock(&queue_mutex);
+			return NULL;
+		}
+	}
+
+	if (stop_flag) {
+		pthread_mutex_unlock(&queue_mutex);
+		return NULL;
+	}
+
+	event_node_t *node = event_queue_head;
+	event_queue_head = node->next;
+	if (!event_queue_head) {
+		event_queue_tail = NULL;
+	}
+	pthread_mutex_unlock(&queue_mutex);
+
+	beegfs_event *event = malloc(sizeof(beegfs_event));
+	memcpy(event, &node->event, sizeof(beegfs_event));
+	free(node);
+	return event;
+}
 
 static void process_attr_update(beegfs_event *event, const char *db_root, const char *beegfs_root) {
 	char file_path[MAXPATH];
@@ -60,7 +127,6 @@ static void process_attr_update(beegfs_event *event, const char *db_root, const 
 		shortpath(file_path, parent, name);
 		SNPRINTF(db_path, sizeof(db_path), "%s/" DBNAME, parent);
 		sqlite3 *db = opendb(db_path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, NULL, NULL);
-
 		sqlite3_stmt *stmt;
 		const char *sql =
 				"UPDATE entries SET size = ?, blocks = ?, blksize = ?, inode = ?, nlink = ?, mode = ?, uid = ?, gid = ?, atime = ?, mtime = ?, ctime = ? WHERE name = ?;";
@@ -199,7 +265,7 @@ static void process_unlink(beegfs_event *event, const char *db_root) {
 		shortpath(filePath, parent, name);
 		SNPRINTF(dbPath, sizeof(dbPath), "%s/" DBNAME, parent);
 
-		sqlite3 *db = opendb(dbPath, SQLITE_OPEN_READWRITE, 0, 0, NULL, NULL);
+		sqlite3 *db = opendb(dbPath, SQLITE_OPEN_READWRITE, 1, 0, NULL, NULL);
 
 		sqlite3_stmt *stmt;
 		const char *sql = "DELETE FROM ENTRIES WHERE name = ?;";
@@ -214,8 +280,6 @@ static void process_unlink(beegfs_event *event, const char *db_root) {
 		rc = sqlite3_step(stmt);
 		if (rc != SQLITE_DONE) {
 			fprintf(stderr, "Execution failed: %s\n", sqlite3_errmsg(db));
-		} else {
-			printf("Deleted file with name: %s\n", name);
 		}
 
 		sqlite3_finalize(stmt);
@@ -431,8 +495,6 @@ static void process_rename(beegfs_event *event, const char *db_root, const char 
 			rc = sqlite3_step(stmt);
 			if (rc != SQLITE_DONE) {
 				fprintf(stderr, "Failed to execute update: %s\n", sqlite3_errmsg(db));
-			} else {
-				printf("Update successful: %s -> %s\n", old_name, new_name);
 			}
 
 			// Finalize the statement
@@ -502,6 +564,9 @@ void signal_handler(int signum) {
 	stop_flag = 1;
 	close(listen_fd);
 	close(epoll_fd);
+	pthread_mutex_lock(&queue_mutex);
+	pthread_cond_broadcast(&queue_cond);
+	pthread_mutex_unlock(&queue_mutex);
 }
 
 void set_nonblocking(int sockfd) {
@@ -568,7 +633,7 @@ void handle_client(int client_fd) {
 
 		status = phase_body(buffer, event.size - EVENT_HEADER_SIZE, &event);
 		if (status == Success) {
-			process_event(&event, db_root, beegfs_root);
+			enqueue_event(&event);
 		} else {
 			perror("Failed to parse message");
 		}
@@ -656,6 +721,17 @@ int init_server(const char *address, int port) {
 	return 0;
 }
 
+void *worker_thread_func(void *arg) {
+	while (!stop_flag) {
+		beegfs_event *event = dequeue_event();
+		if (!event) continue;
+
+		process_event(event, db_root, beegfs_root);
+		free(event);
+	}
+	return NULL;
+}
+
 int main(int argc, char *argv[]) {
 	if (argc < 4) {
 		fprintf(stderr, "Usage: %s <port> <GUFI index root path> <BeeGFS mountpoint>\n", argv[0]);
@@ -673,6 +749,10 @@ int main(int argc, char *argv[]) {
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
 
+	for (int i = 0; i < NUM_WORKERS; i++) {
+		pthread_create(&workers[i], NULL, worker_thread_func, NULL);
+	}
+
 	if (init_server("0.0.0.0", port) < 0) {
 		return 1;
 	}
@@ -681,6 +761,10 @@ int main(int argc, char *argv[]) {
 	pthread_create(&epoll_thread, NULL, epoll_thread_func, NULL);
 
 	pthread_join(epoll_thread, NULL);
+
+	for (int i = 0; i < NUM_WORKERS; i++) {
+		pthread_join(workers[i], NULL);
+	}
 
 	return 0;
 }
