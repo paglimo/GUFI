@@ -26,73 +26,55 @@
 #define LISTEN_BACKLOG 128
 #define NUM_WORKERS 1
 
-pthread_t workers[NUM_WORKERS];
-pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+typedef struct app {
+	int port;
+	char *db_root;
+	char *beegfs_root;
 
-typedef struct event_node {
-	beegfs_event event;
-	struct event_node *next;
-} event_node_t;
+	int listen_fd; // socket fd for listening events from beegfs event-listener
+	int epoll_fd; // listen connect request and event arrival
 
-event_node_t *event_queue_head = NULL;
-event_node_t *event_queue_tail = NULL;
+	sll_t event_queue;
+	pthread_mutex_t queue_mutex;
 
+	pthread_cond_t queue_cond;
+	pthread_t workers[NUM_WORKERS];
+} app_t;
+
+app_t app;
 volatile sig_atomic_t stop_flag = 0;
-int listen_fd, epoll_fd;
-char *db_root, *beegfs_root;
 
 void enqueue_event(beegfs_event *event) {
-	event_node_t *new_node = malloc(sizeof(event_node_t));
-	if (!new_node) {
-		perror("malloc failed");
-		return;
-	}
-	memcpy(&new_node->event, event, sizeof(beegfs_event));
-	new_node->next = NULL;
-
-	pthread_mutex_lock(&queue_mutex);
-	if (event_queue_tail) {
-		event_queue_tail->next = new_node;
-	} else {
-		event_queue_head = new_node;
-	}
-	event_queue_tail = new_node;
-	pthread_cond_signal(&queue_cond);
-	pthread_mutex_unlock(&queue_mutex);
+	pthread_mutex_lock(&app.queue_mutex);
+	sll_push(&app.event_queue, event);
+	pthread_cond_signal(&app.queue_cond);
+	pthread_mutex_unlock(&app.queue_mutex);
 }
 
 beegfs_event *dequeue_event() {
 	struct timespec ts;
-	pthread_mutex_lock(&queue_mutex);
+	pthread_mutex_lock(&app.queue_mutex);
 
-	while (!event_queue_head && !stop_flag) {
+	while (sll_get_size(&app.event_queue) == 0 && !stop_flag) {
 		// Set a timeout to avoid indefinite blocking
 		clock_gettime(CLOCK_REALTIME, &ts);
 		ts.tv_sec += 1; // 1-second timeout
 
-		int res = pthread_cond_timedwait(&queue_cond, &queue_mutex, &ts);
+		int res = pthread_cond_timedwait(&app.queue_cond, &app.queue_mutex, &ts);
 		if (res == ETIMEDOUT && stop_flag) {
-			pthread_mutex_unlock(&queue_mutex);
+			pthread_mutex_unlock(&app.queue_mutex);
 			return NULL;
 		}
 	}
 
 	if (stop_flag) {
-		pthread_mutex_unlock(&queue_mutex);
+		pthread_mutex_unlock(&app.queue_mutex);
 		return NULL;
 	}
 
-	event_node_t *node = event_queue_head;
-	event_queue_head = node->next;
-	if (!event_queue_head) {
-		event_queue_tail = NULL;
-	}
-	pthread_mutex_unlock(&queue_mutex);
+	beegfs_event *event = sll_pop(&app.event_queue);
+	pthread_mutex_unlock(&app.queue_mutex);
 
-	beegfs_event *event = malloc(sizeof(beegfs_event));
-	memcpy(event, &node->event, sizeof(beegfs_event));
-	free(node);
 	return event;
 }
 
@@ -562,11 +544,9 @@ static void process_event(beegfs_event *event, const char *db_root, const char *
 void signal_handler(int signum) {
 	printf("Caught signal %d\n", signum);
 	stop_flag = 1;
-	close(listen_fd);
-	close(epoll_fd);
-	pthread_mutex_lock(&queue_mutex);
-	pthread_cond_broadcast(&queue_cond);
-	pthread_mutex_unlock(&queue_mutex);
+	pthread_mutex_lock(&app.queue_mutex);
+	pthread_cond_broadcast(&app.queue_cond);
+	pthread_mutex_unlock(&app.queue_mutex);
 }
 
 void set_nonblocking(int sockfd) {
@@ -612,28 +592,28 @@ void handle_client(int client_fd) {
 		}
 		if (bytes_received == 0) {
 			printf("Client disconnected: %d\n", client_fd);
-			epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+			epoll_ctl(app.epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
 			close(client_fd);
 			return;
 		}
 
-		beegfs_event event;
-		ReadErrorCode status = phase_header(buffer, &event);
+		beegfs_event *event = malloc(sizeof(beegfs_event));
+		ReadErrorCode status = phase_header(buffer, event);
 		if (status != Success) {
 			printf("Packet parsing error: %d\n", status);
 			close(client_fd);
 			return;
 		}
 
-		bytes_received = recv_all(client_fd, buffer, event.size - EVENT_HEADER_SIZE);
+		bytes_received = recv_all(client_fd, buffer, event->size - EVENT_HEADER_SIZE);
 		if (bytes_received <= 0) {
 			close(client_fd);
 			return;
 		}
 
-		status = phase_body(buffer, event.size - EVENT_HEADER_SIZE, &event);
+		status = phase_body(buffer, event->size - EVENT_HEADER_SIZE, event);
 		if (status == Success) {
-			enqueue_event(&event);
+			enqueue_event(event);
 		} else {
 			perror("Failed to parse message");
 		}
@@ -644,7 +624,7 @@ void *epoll_thread_func(void *arg) {
 	struct epoll_event events[MAX_EVENTS];
 
 	while (!stop_flag) {
-		int num_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, 5000);
+		int num_fds = epoll_wait(app.epoll_fd, events, MAX_EVENTS, 5000);
 		if (num_fds < 0 && errno != EINTR) {
 			perror("epoll_wait failed");
 			break;
@@ -653,12 +633,12 @@ void *epoll_thread_func(void *arg) {
 		for (int i = 0; i < num_fds; i++) {
 			int fd = events[i].data.fd;
 
-			if (fd == listen_fd) {
+			if (fd == app.listen_fd) {
 				struct sockaddr_in client_addr;
 				socklen_t client_addr_len = sizeof(client_addr);
 
 				while (1) {
-					int accepted_socket = accept(listen_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+					int accepted_socket = accept(app.listen_fd, (struct sockaddr *) &client_addr, &client_addr_len);
 					if (accepted_socket < 0) {
 						if (errno == EAGAIN || errno == EWOULDBLOCK) {
 							break;
@@ -672,7 +652,7 @@ void *epoll_thread_func(void *arg) {
 					struct epoll_event event;
 					event.events = EPOLLIN | EPOLLET;
 					event.data.fd = accepted_socket;
-					epoll_ctl(epoll_fd, EPOLL_CTL_ADD, accepted_socket, &event);
+					epoll_ctl(app.epoll_fd, EPOLL_CTL_ADD, accepted_socket, &event);
 				}
 			} else {
 				handle_client(fd);
@@ -683,40 +663,40 @@ void *epoll_thread_func(void *arg) {
 	return NULL;
 }
 
-int init_server(const char *address, int port) {
+int init_server() {
 	struct sockaddr_in server_addr;
 
-	listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (listen_fd < 0) {
+	app.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (app.listen_fd < 0) {
 		perror("Socket creation failed");
 		return -1;
 	}
 
 	int opt = 1;
-	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-	set_nonblocking(listen_fd);
+	setsockopt(app.listen_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+	set_nonblocking(app.listen_fd);
 
 	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(port);
-	server_addr.sin_addr.s_addr = inet_addr(address);
+	server_addr.sin_port = htons(app.port);
+	server_addr.sin_addr.s_addr = inet_addr(INADDR_ANY);
 
-	if (bind(listen_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+	if (bind(app.listen_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
 		perror("Binding failed");
-		close(listen_fd);
+		close(app.listen_fd);
 		return -1;
 	}
 
-	if (listen(listen_fd, LISTEN_BACKLOG) < 0) {
+	if (listen(app.listen_fd, LISTEN_BACKLOG) < 0) {
 		perror("Listen failed");
-		close(listen_fd);
+		close(app.listen_fd);
 		return -1;
 	}
 
-	epoll_fd = epoll_create1(0);
+	app.epoll_fd = epoll_create1(0);
 	struct epoll_event event;
 	event.events = EPOLLIN;
-	event.data.fd = listen_fd;
-	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
+	event.data.fd = app.listen_fd;
+	epoll_ctl(app.epoll_fd, EPOLL_CTL_ADD, app.listen_fd, &event);
 
 	return 0;
 }
@@ -726,21 +706,23 @@ void *worker_thread_func(void *arg) {
 		beegfs_event *event = dequeue_event();
 		if (!event) continue;
 
-		process_event(event, db_root, beegfs_root);
+		process_event(event, app.db_root, app.beegfs_root);
 		free(event);
 	}
 	return NULL;
 }
 
-int main(int argc, char *argv[]) {
+int app_init(int argc, char *argv[]) {
 	if (argc < 4) {
 		fprintf(stderr, "Usage: %s <port> <GUFI index root path> <BeeGFS mountpoint>\n", argv[0]);
 		return 1;
 	}
 
-	int port = atoi(argv[1]);
-	db_root = argv[2];
-	beegfs_root = argv[3];
+	app.port = atoi(argv[1]);
+	app.db_root = argv[2];
+	app.beegfs_root = argv[3];
+
+	sll_init(&app.event_queue);
 
 	struct sigaction sa;
 	sa.sa_handler = signal_handler;
@@ -750,21 +732,42 @@ int main(int argc, char *argv[]) {
 	sigaction(SIGINT, &sa, NULL);
 
 	for (int i = 0; i < NUM_WORKERS; i++) {
-		pthread_create(&workers[i], NULL, worker_thread_func, NULL);
+		pthread_create(&app.workers[i], NULL, worker_thread_func, NULL);
 	}
 
-	if (init_server("0.0.0.0", port) < 0) {
+	pthread_mutex_init(&app.queue_mutex, NULL);
+	pthread_cond_init(&app.queue_cond, NULL);
+	return 0;
+}
+
+void app_uinit() {
+	close(app.listen_fd);
+	close(app.epoll_fd);
+
+	sll_destroy(&app.event_queue, free);
+
+	pthread_mutex_destroy(&app.queue_mutex);
+	pthread_cond_destroy(&app.queue_cond);
+}
+
+int main(int argc, char *argv[]) {
+	if (app_init(argc, argv) != 0) {
 		return 1;
 	}
 
+	if (init_server() < 0) {
+		return 1;
+	}
+
+
 	pthread_t epoll_thread;
 	pthread_create(&epoll_thread, NULL, epoll_thread_func, NULL);
-
 	pthread_join(epoll_thread, NULL);
 
 	for (int i = 0; i < NUM_WORKERS; i++) {
-		pthread_join(workers[i], NULL);
+		pthread_join(app.workers[i], NULL);
 	}
 
+	app_uinit();
 	return 0;
 }
