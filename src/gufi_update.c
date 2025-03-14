@@ -25,6 +25,7 @@
 #define MAX_EVENTS 1024
 #define LISTEN_BACKLOG 128
 #define NUM_WORKERS 1
+#define MAX_TRANSMISSION 100000
 
 typedef struct app {
 	int port;
@@ -33,6 +34,8 @@ typedef struct app {
 
 	int listen_fd; // socket fd for listening events from beegfs event-listener
 	int epoll_fd; // listen connect request and event arrival
+	sll_t socket_list;
+	pthread_mutex_t socket_mutex;
 
 	sll_t event_queue;
 	pthread_mutex_t queue_mutex;
@@ -506,6 +509,9 @@ static void process_rename(beegfs_event *event, const char *db_root, const char 
 }
 
 static void process_event(beegfs_event *event, const char *db_root, const char *beegfs_root) {
+	if (event == NULL) {
+		return;
+	}
 	switch (event->type) {
 		// ignore FLUSH and READ events
 		case FLUSH:
@@ -638,8 +644,14 @@ void *epoll_thread_func(void *arg) {
 				socklen_t client_addr_len = sizeof(client_addr);
 
 				while (1) {
-					int accepted_socket = accept(app.listen_fd, (struct sockaddr *) &client_addr, &client_addr_len);
-					if (accepted_socket < 0) {
+					int *accepted_socket = malloc(sizeof(int));
+					if (!accepted_socket) {
+						perror("malloc failed");
+						continue;
+					}
+
+					*accepted_socket = accept(app.listen_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+					if (*accepted_socket < 0) {
 						if (errno == EAGAIN || errno == EWOULDBLOCK) {
 							break;
 						}
@@ -647,12 +659,16 @@ void *epoll_thread_func(void *arg) {
 						break;
 					}
 
-					set_nonblocking(accepted_socket);
+					set_nonblocking(*accepted_socket);
 
 					struct epoll_event event;
 					event.events = EPOLLIN | EPOLLET;
-					event.data.fd = accepted_socket;
-					epoll_ctl(app.epoll_fd, EPOLL_CTL_ADD, accepted_socket, &event);
+					event.data.fd = *accepted_socket;
+					epoll_ctl(app.epoll_fd, EPOLL_CTL_ADD, *accepted_socket, &event);
+
+					pthread_mutex_lock(&app.socket_mutex);
+					sll_push(&app.socket_list, accepted_socket);
+					pthread_mutex_unlock(&app.socket_mutex);
 				}
 			} else {
 				handle_client(fd);
@@ -678,7 +694,7 @@ int init_server() {
 
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_port = htons(app.port);
-	server_addr.sin_addr.s_addr = inet_addr(INADDR_ANY);
+	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
 	if (bind(app.listen_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
 		perror("Binding failed");
@@ -724,6 +740,9 @@ int app_init(int argc, char *argv[]) {
 
 	sll_init(&app.event_queue);
 
+	sll_init(&app.socket_list);
+	pthread_mutex_init(&app.socket_mutex,NULL);
+
 	struct sigaction sa;
 	sa.sa_handler = signal_handler;
 	sa.sa_flags = 0;
@@ -744,6 +763,17 @@ void app_uinit() {
 	close(app.listen_fd);
 	close(app.epoll_fd);
 
+	pthread_mutex_lock(&app.socket_mutex);
+	int *socket_fd = sll_pop(&app.socket_list);
+	while (socket_fd) {
+		// close accepted socket from socket list
+		close(*socket_fd);
+		free(socket_fd);
+		socket_fd = sll_pop(&app.socket_list);
+	}
+	pthread_mutex_unlock(&app.socket_mutex);
+	pthread_mutex_destroy(&app.socket_mutex);
+
 	sll_destroy(&app.event_queue, free);
 
 	pthread_mutex_destroy(&app.queue_mutex);
@@ -758,7 +788,6 @@ int main(int argc, char *argv[]) {
 	if (init_server() < 0) {
 		return 1;
 	}
-
 
 	pthread_t epoll_thread;
 	pthread_create(&epoll_thread, NULL, epoll_thread_func, NULL);
