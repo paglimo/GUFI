@@ -34,7 +34,7 @@ void read_string(beegfs_reader *reader, char *buffer, size_t max_len) {
 	reader->position += len + 1;
 }
 
-ReadErrorCode phase_header(const char *data, beegfs_event *res) {
+ReadErrorCode phase_header(const char *data, struct beegfs_event *res) {
 	beegfs_reader reader = {data, data + EVENT_HEADER_SIZE};
 	res->formatVersionMajor = READ_RAW(&reader, uint16_t);
 	res->formatVersionMinor = READ_RAW(&reader, uint16_t);
@@ -45,7 +45,7 @@ ReadErrorCode phase_header(const char *data, beegfs_event *res) {
 	return Success;
 }
 
-ReadErrorCode phase_body(const char *data, size_t body_size, beegfs_event *res) {
+ReadErrorCode phase_body(const char *data, size_t body_size, struct beegfs_event *res) {
 	beegfs_reader reader = {data, data + body_size};
 
 	res->droppedSeq = read_u64(&reader);

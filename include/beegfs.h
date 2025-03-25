@@ -33,7 +33,7 @@ typedef enum {
 	READ = 12,
 } beegfs_event_type;
 
-typedef struct {
+typedef struct beegfs_event{
 	uint16_t formatVersionMajor;
 	uint16_t formatVersionMinor;
 	uint32_t size;
@@ -45,14 +45,14 @@ typedef struct {
 	char path[PATH_MAX];
 	char targetPath[PATH_MAX];
 	char targetParentId[256];
-} beegfs_event;
+} beegfs_event_t;
 
 typedef struct {
 	const char *position;
 	const char *end;
 } beegfs_reader;
 
-ReadErrorCode phase_header(const char *data, beegfs_event *res);
-ReadErrorCode phase_body(const char *data, size_t body_size, beegfs_event *res);
+ReadErrorCode phase_header(const char *data, struct beegfs_event *res);
+ReadErrorCode phase_body(const char *data, size_t body_size, struct beegfs_event *res);
 
 #endif //BEEGFS_H
