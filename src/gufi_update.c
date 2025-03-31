@@ -29,7 +29,7 @@ const char ENTRIES_DELETE[] = "DELETE FROM " ENTRIES " WHERE name = ?;";
 
 #define MAX_EVENTS 1024
 #define LISTEN_BACKLOG 128
-#define NUM_WORKERS 1
+#define NUM_WORKERS 2
 #define MAX_TRANSMISSION 10000
 #define SESSION_CLEAN_INTERVAL 10
 #define SESSION_EXPIRE_INTERVAL 5
@@ -274,27 +274,22 @@ struct beegfs_event *dequeue_event() {
     pthread_mutex_lock(&app.queue_mutex);
 
     while (sll_get_size(&app.event_queue) == 0 && !stop_flag) {
-        // Set a timeout to avoid indefinite blocking
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += 1; // 1-second timeout
-
-        int res = pthread_cond_timedwait(&app.queue_cond, &app.queue_mutex, &ts);
-        if (res == ETIMEDOUT && stop_flag) {
-            pthread_mutex_unlock(&app.queue_mutex);
-            return NULL;
-        }
+        ts.tv_sec += 1;
+        pthread_cond_timedwait(&app.queue_cond, &app.queue_mutex, &ts);
     }
 
-    if (stop_flag) {
+    // 再次检查 stop_flag 和队列为空的情况
+    if (stop_flag && sll_get_size(&app.event_queue) == 0) {
         pthread_mutex_unlock(&app.queue_mutex);
         return NULL;
     }
 
     struct beegfs_event *event = sll_pop(&app.event_queue);
     pthread_mutex_unlock(&app.queue_mutex);
-
     return event;
 }
+
 
 
 static void process_attr_update(struct beegfs_event *event, const char *db_root, const char *beegfs_root) {
@@ -894,6 +889,8 @@ int init_server() {
 }
 
 void *worker_thread_func(void *arg) {
+    printf("[worker %ld] started\n", pthread_self());
+
     while (!stop_flag) {
         struct beegfs_event *event = dequeue_event();
         if (!event) continue;
@@ -901,6 +898,8 @@ void *worker_thread_func(void *arg) {
         process_event(event, app.db_root, app.beegfs_root);
         free(event);
     }
+
+    printf("[worker %ld] exiting\n", pthread_self());
     return NULL;
 }
 
@@ -962,9 +961,10 @@ void app_uinit() {
     }
     sll_destroy(&app.event_queue, free);
     pthread_mutex_unlock(&app.queue_mutex);
-    pthread_mutex_destroy(&app.queue_mutex);
 
     pthread_cond_destroy(&app.queue_cond);
+    // must destroy mutex after cond destroyed or pthread_cond_destroy will pend forever
+    pthread_mutex_destroy(&app.queue_mutex);
 
     pthread_rwlock_wrlock(&app.session_rwlock);
     // iterate over all sessions and close them
@@ -1014,12 +1014,13 @@ int main(int argc, char *argv[]) {
     }
 
     pthread_join(epoll_thread, NULL);
-
     pthread_join(session_cleaner, NULL);
 
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(app.workers[i], NULL);
     }
+
+    printf("All threads joined.\n");
 
     app_uinit();
     return 0;
