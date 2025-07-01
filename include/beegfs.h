@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <linux/limits.h>
 
 // sizeof(beegfs_event) = 8992, should make sure buffer size > beegfs_event size
@@ -18,33 +19,36 @@ typedef enum {
 } ReadErrorCode;
 
 typedef enum {
-	FLUSH = 0,
-	TRUNCATE = 1,
-	SETATTR = 2,
-	CLOSE_WRITE = 3,
-	CREATE = 4,
-	MKDIR = 5,
-	MKNOD = 6,
-	SYMLINK = 7,
-	RMDIR = 8,
-	UNLINK = 9,
-	HARDLINK = 10,
-	RENAME = 11,
-	READ = 12,
+	FLUSH = 1,
+	TRUNCATE = 2,
+	SETATTR = 3,
+	CLOSE_WRITE = 4,
+	CREATE = 5,
+	MKDIR = 6,
+	MKNOD = 7,
+	SYMLINK = 8,
+	RMDIR = 9,
+	UNLINK = 10,
+	HARDLINK = 11,
+	RENAME = 12,
+	OPEN_READ = 13,
+	OPEN_WRITE = 14,
+	OPEN_READ_WRITE = 15,
+	LAST_WRITER_CLOSED = 16
 } beegfs_event_type;
 
 typedef struct beegfs_event{
 	uint16_t formatVersionMajor;
-	uint16_t formatVersionMinor;
-	uint32_t size;
-	uint64_t droppedSeq;
-	uint64_t missedSeq;
+	uint32_t eventFlags;
+	uint64_t linkCount;
 	beegfs_event_type type;
+	char path[PATH_MAX];
 	char entryId[256];
 	char parentEntryId[256];
-	char path[PATH_MAX];
 	char targetPath[PATH_MAX];
 	char targetParentId[256];
+	uint32_t msgUserID;
+	uint64_t timestamp;
 } beegfs_event_t;
 
 typedef struct {
@@ -52,7 +56,7 @@ typedef struct {
 	const char *end;
 } beegfs_reader;
 
-ReadErrorCode phase_header(const char *data, struct beegfs_event *res);
 ReadErrorCode phase_body(const char *data, size_t body_size, struct beegfs_event *res);
 
+void print_beegfs_event(const beegfs_event_t *event);
 #endif //BEEGFS_H

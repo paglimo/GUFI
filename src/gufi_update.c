@@ -29,7 +29,7 @@ const char ENTRIES_DELETE[] = "DELETE FROM " ENTRIES " WHERE name = ?;";
 
 #define MAX_EVENTS 1024
 #define LISTEN_BACKLOG 128
-#define NUM_WORKERS 2
+#define NUM_WORKERS 12
 #define MAX_TRANSMISSION 10000
 #define SESSION_CLEAN_INTERVAL 10
 #define SESSION_EXPIRE_INTERVAL 5
@@ -73,7 +73,6 @@ typedef struct db_session {
     int summary_count;
 
     pthread_mutex_t mutex;
-
 } db_session_t;
 
 app_t app;
@@ -193,8 +192,7 @@ void insert_sql_buffer(const char *file_name, struct stat *stat_buf, enum sessio
         session = new_db_session(db_path, type);
         sll_push(&app.db_sessions, session);
         pthread_rwlock_unlock(&app.session_rwlock);
-    }
-    else {
+    } else {
         time(&session->last_access);
     }
 
@@ -219,13 +217,13 @@ void insert_sql_buffer(const char *file_name, struct stat *stat_buf, enum sessio
             case SESSION_TYPE_UPDATE:
                 rc = sqlite3_prepare_v2(session->db, ENTRIES_UPDATE, -1, &session->stmt, 0);
                 if (rc != SQLITE_OK) {
-                    perror("sqlite3_prepare_v2");
+                    perror("sqlite3_prepare_v2 SESSION_TYPE_UPDATE");
                 }
                 break;
             case SESSION_TYPE_DELETE:
                 rc = sqlite3_prepare_v2(session->db, ENTRIES_DELETE, -1, &session->stmt, 0);
                 if (rc != SQLITE_OK) {
-                    perror("sqlite3_prepare_v2");
+                    perror("sqlite3_prepare_v2 SESSION_TYPE_DELETE");
                 }
                 printf("session type not match, change from %d to %d\n", session->type, type);
                 break;
@@ -246,7 +244,8 @@ void insert_sql_buffer(const char *file_name, struct stat *stat_buf, enum sessio
     }
 
     // check if the session is too big, if so, commit the transaction
-    if (session->row_count >= MAX_TRANSMISSION || difftime(time(NULL), session->last_commit) >= SESSION_EXPIRE_INTERVAL) {
+    if (session->row_count >= MAX_TRANSMISSION || difftime(time(NULL), session->last_commit) >=
+        SESSION_EXPIRE_INTERVAL) {
         stopdb(session->db);
         startdb(session->db);
         char sql[256];
@@ -271,25 +270,21 @@ void enqueue_event(struct beegfs_event *event) {
 
 struct beegfs_event *dequeue_event() {
     struct timespec ts;
-    pthread_mutex_lock(&app.queue_mutex);
+    struct beegfs_event *event = NULL;
 
-    while (sll_get_size(&app.event_queue) == 0 && !stop_flag) {
+    pthread_mutex_lock(&app.queue_mutex);
+    while (!stop_flag && sll_get_size(&app.event_queue) == 0) {
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += 1;
         pthread_cond_timedwait(&app.queue_cond, &app.queue_mutex, &ts);
     }
 
-    // 再次检查 stop_flag 和队列为空的情况
-    if (stop_flag && sll_get_size(&app.event_queue) == 0) {
-        pthread_mutex_unlock(&app.queue_mutex);
-        return NULL;
+    if (sll_get_size(&app.event_queue) > 0) {
+        event = sll_pop(&app.event_queue);
     }
-
-    struct beegfs_event *event = sll_pop(&app.event_queue);
     pthread_mutex_unlock(&app.queue_mutex);
     return event;
 }
-
 
 
 static void process_attr_update(struct beegfs_event *event, const char *db_root, const char *beegfs_root) {
@@ -617,7 +612,9 @@ static void process_event(struct beegfs_event *event, const char *db_root, const
     switch (event->type) {
         // ignore FLUSH and READ events
         case FLUSH:
-        case READ:
+        case OPEN_READ:
+        case OPEN_WRITE:
+        case LAST_WRITER_CLOSED:
             break;
         // update file size and other attributes on TRUNCATE, SETATTR, and CLOSE_WRITE events
         case TRUNCATE:
@@ -691,7 +688,7 @@ void handle_client(int client_fd) {
     char buffer[MAX_BUFFER_SIZE];
 
     while (1) {
-        ssize_t bytes_received = recv(client_fd, buffer, EVENT_HEADER_SIZE, 0);
+        ssize_t bytes_received = recv(client_fd, buffer, 1024, 0);
         if (bytes_received < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             perror("recv failed");
@@ -706,21 +703,9 @@ void handle_client(int client_fd) {
         }
 
         struct beegfs_event *event = malloc(sizeof(struct beegfs_event));
-        ReadErrorCode status = phase_header(buffer, event);
-        if (status != Success) {
-            printf("Packet parsing error: %d\n", status);
-            close(client_fd);
-            return;
-        }
-
-        bytes_received = recv_all(client_fd, buffer, event->size - EVENT_HEADER_SIZE);
-        if (bytes_received <= 0) {
-            close(client_fd);
-            return;
-        }
-
-        status = phase_body(buffer, event->size - EVENT_HEADER_SIZE, event);
+        ReadErrorCode status = phase_body(buffer, 1024, event);
         if (status == Success) {
+            print_beegfs_event(event);
             enqueue_event(event);
         } else {
             perror("Failed to parse message");
@@ -889,17 +874,22 @@ int init_server() {
 }
 
 void *worker_thread_func(void *arg) {
-    printf("[worker %ld] started\n", pthread_self());
+    pthread_t tid = pthread_self();
+    printf("[worker %lu] started\n", (unsigned long)tid);
 
-    while (!stop_flag) {
+    while (1) {
         struct beegfs_event *event = dequeue_event();
-        if (!event) continue;
+
+        if (!event) {
+            if (stop_flag) break;  // graceful shutdown
+            continue;              // spurious wake-up
+        }
 
         process_event(event, app.db_root, app.beegfs_root);
         free(event);
     }
 
-    printf("[worker %ld] exiting\n", pthread_self());
+    printf("[worker %lu] exiting\n", (unsigned long)tid);
     return NULL;
 }
 
@@ -925,14 +915,15 @@ int app_init(int argc, char *argv[]) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
 
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        pthread_create(&app.workers[i], NULL, worker_thread_func, NULL);
-    }
-
     pthread_mutex_init(&app.queue_mutex, NULL);
     pthread_cond_init(&app.queue_cond, NULL);
 
     pthread_rwlock_init(&app.session_rwlock, NULL);
+
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        pthread_create(&app.workers[i], NULL, worker_thread_func, NULL);
+    }
+
     return 0;
 }
 
@@ -940,7 +931,6 @@ void app_uinit() {
     close(app.listen_fd);
     close(app.epoll_fd);
 
-    pthread_mutex_lock(&app.socket_mutex);
     int *socket_fd = sll_pop(&app.socket_list);
     while (socket_fd) {
         // close accepted socket from socket list
@@ -948,8 +938,8 @@ void app_uinit() {
         free(socket_fd);
         socket_fd = sll_pop(&app.socket_list);
     }
+
     sll_destroy(&app.socket_list, free);
-    pthread_mutex_unlock(&app.socket_mutex);
     pthread_mutex_destroy(&app.socket_mutex);
 
     pthread_mutex_lock(&app.queue_mutex);
@@ -959,10 +949,10 @@ void app_uinit() {
         free(event);
         event = sll_pop(&app.event_queue);
     }
-    sll_destroy(&app.event_queue, free);
     pthread_mutex_unlock(&app.queue_mutex);
 
     pthread_cond_destroy(&app.queue_cond);
+    sll_destroy(&app.event_queue, free);
     // must destroy mutex after cond destroyed or pthread_cond_destroy will pend forever
     pthread_mutex_destroy(&app.queue_mutex);
 
