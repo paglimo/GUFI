@@ -31,10 +31,11 @@ typedef enum {
 	UNLINK = 10,
 	HARDLINK = 11,
 	RENAME = 12,
-	OPEN_READ = 13,
-	OPEN_WRITE = 14,
-	OPEN_READ_WRITE = 15,
-	LAST_WRITER_CLOSED = 16
+	RECORD = 13,
+	OPEN_READ = 14,
+	OPEN_WRITE = 15,
+	OPEN_READ_WRITE = 16,
+	LAST_WRITER_CLOSED = 17
 } beegfs_event_type;
 
 typedef struct beegfs_event{
@@ -59,4 +60,6 @@ typedef struct {
 ReadErrorCode phase_body(const char *data, size_t body_size, struct beegfs_event *res);
 
 void print_beegfs_event(const beegfs_event_t *event);
+
+const char *beegfs_event_to_string(const beegfs_event_t *event);
 #endif //BEEGFS_H
