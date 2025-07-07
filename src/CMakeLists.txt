@@ -122,7 +122,6 @@ set(GUFI_SOURCES
   trie.c
   utils.c
   xattrs.c
-  beegfs.c
 )
 add_library(GUFI STATIC ${GUFI_SOURCES})
 add_dependencies(GUFI install_dependencies)
@@ -188,7 +187,6 @@ set(C_SOURCES
   gufi_unrollup.c
   parallel_cpr.c
   parallel_rmr.c
-  gufi_update.c
 )
 
 # build the C executables
@@ -209,12 +207,27 @@ add_library(gufi_query_lib OBJECT
   gufi_query/query.c
 )
 
+add_library(gufi_index_lib OBJECT
+  gufi_index/reader.c
+  gufi_index/config.c
+  gufi_index/worker.c
+  gufi_index/index_db.c
+)
+
 add_dependencies(gufi_query_lib GUFI)
 target_compile_definitions(gufi_query_lib PUBLIC SQLITE_CORE)
+
+add_dependencies(gufi_index_lib GUFI)
+target_compile_definitions(gufi_index_lib PUBLIC SQLITE_CORE)
 
 build_and_install_one(${BIN} TRUE gufi_query
   gufi_query/main.c
   $<TARGET_OBJECTS:gufi_query_lib>
+)
+
+build_and_install_one(${BIN} TRUE gufi_index
+  gufi_index/main.c
+  $<TARGET_OBJECTS:gufi_index_lib>
 )
 
 # build custom SQLite virtual tables

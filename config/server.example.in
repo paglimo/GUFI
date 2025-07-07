@@ -81,5 +81,20 @@ Stat=@CMAKE_INSTALL_PREFIX@/bin/gufi_stat_bin
 # single path string
 IndexRoot=/search
 
+# directory where filesystem to be indexed
+Mountpoint=
+
+# number of threads to process event from filesystem
+NumWorkers=1
+
+# log level for gufi_index, debug or normal
+LogLevel=normal
+
+# listen port for gufi_index
+Port=6000
+
+# config use aggressive poll for gufi_index
+AggressivePoll=FALSE
+
 # size of per-thread print buffers
 OutputBuffer=4096

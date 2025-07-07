@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <linux/limits.h>
 
-// sizeof(beegfs_event) = 8992, should make sure buffer size > beegfs_event size
+// sizeof(fs_event) = 8992, should make sure buffer size > fs_event size
 #define MAX_BUFFER_SIZE (1024*1024*4)
 
 #define EVENT_HEADER_SIZE 8
@@ -36,13 +36,13 @@ typedef enum {
 	OPEN_WRITE = 15,
 	OPEN_READ_WRITE = 16,
 	LAST_WRITER_CLOSED = 17
-} beegfs_event_type;
+} fs_event_type;
 
-typedef struct beegfs_event{
+typedef struct fs_event{
 	uint16_t formatVersionMajor;
 	uint32_t eventFlags;
 	uint64_t linkCount;
-	beegfs_event_type type;
+	fs_event_type type;
 	char path[PATH_MAX];
 	char entryId[256];
 	char parentEntryId[256];
@@ -50,16 +50,32 @@ typedef struct beegfs_event{
 	char targetParentId[256];
 	uint32_t msgUserID;
 	uint64_t timestamp;
-} beegfs_event_t;
+} fs_event_t;
 
 typedef struct {
 	const char *position;
 	const char *end;
-} beegfs_reader;
+} event_reader;
 
-ReadErrorCode phase_body(const char *data, size_t body_size, struct beegfs_event *res);
+typedef struct file_pattern {
+	int64_t owner_id;
+	char entry_id[256];
+	char parent_id[256];
+	int8_t entry_type;
+	int64_t feature_flag;
+	unsigned pattern_type;
+	unsigned chunk_size;
+	uint16_t num_targets;
+	char target_info[256];
+} file_pattern_t;
 
-void print_beegfs_event(const beegfs_event_t *event);
+ReadErrorCode packet_to_event(const char *data, size_t body_size, struct fs_event *res);
+char *event_to_str(const fs_event_t *event);
+void print_file_pattern(const file_pattern_t *pattern);
 
-const char *beegfs_event_to_string(const beegfs_event_t *event);
+const char *event_type_string(const fs_event_t *event);
+
+file_pattern_t *get_file_pattern(const char *file_path, const char* entry_id, const char* parent_entry_id);
+
+void extract_filename(const char *file_path, char name[256]);
 #endif //BEEGFS_H

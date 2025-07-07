@@ -106,6 +106,7 @@ extern const char READDIRPLUS_INSERT[];
 extern const char ENTRIES_CREATE[];
 extern const char ENTRIES_INSERT[];
 
+extern const char SUMMARY_INSERT[];
 /* directory metadata + aggregate data */
 #define SUMMARY           "summary"
 #define SUMMARY_SCHEMA(name, extra_cols)            \
