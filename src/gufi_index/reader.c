@@ -141,17 +141,6 @@ const char *event_type_string(const fs_event_t *event) {
 	}
 }
 
-void extract_filename(const char *file_path,char name[256]) {
-	const char *slash = strrchr(file_path, '/');
-	if (slash) {
-		strncpy(name, slash + 1, 255);
-		name[255] = '\0';
-	} else {
-		strncpy(name, file_path, 255);
-		name[255] = '\0';
-	}
-}
-
 file_pattern_t *get_file_pattern(const char *file_path, const char *entry_id, const char *parent_entry_id) {
 	mode_t MODE_FLAG = S_IRWXU | S_IRGRP | S_IROTH;
 	int OPEN_FLAGS = O_RDWR;

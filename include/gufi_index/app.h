@@ -10,20 +10,17 @@
 #include "uthash/uthash.h"
 
 
-#define FIELD_FLAG_ATTR     1   // received event for attr changed
-#define FIELD_FLAG_XATTR    2   // received event for file xattr changed
-
-enum file_op {
-    MKFILE,
-    UPDATE,
-    DELETE,
-};
+#define DATA_FIELD_INSERT     1
+#define DATA_FIELD_STAT     2
+#define DATA_FIELD_XATTR    4
+#define DATA_FIELD_DELETE   8
 
 typedef struct file_index_cache {
     char entry_id[256];
+    char parent_id[256];
     char file_name[256];
+    const char* file_path;
     struct entry_data ed;
-    enum file_op op;
     uint16_t data_field_flag;
     file_pattern_t *file_pattern;
     pthread_mutex_t file_lock;

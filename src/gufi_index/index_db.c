@@ -114,11 +114,12 @@ int insertsumdb_index(sqlite3 *sdb, const char *path, struct entry_data *ed, str
 }
 
 int insertdbgo_index(file_index_cache_t *item, sqlite3_stmt *res) {
-    char *zino = sqlite3_mprintf("%" PRIu64, item->ed.statuso.st_ino);
+    char inode_str[32];
+    snprintf(inode_str, sizeof(inode_str), "%" PRIu64, item->ed.statuso.st_ino);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@name"), item->file_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@type"), &item->ed.type, 1, SQLITE_STATIC);
     // FIXME: wrong inode num like 1.55088371704356e+19
-    sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@inode"), zino, -1, SQLITE_STATIC);
+    sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@inode"), inode_str, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@mode"), item->ed.statuso.st_mode);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@nlink"), item->ed.statuso.st_nlink);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@uid"), item->ed.statuso.st_uid);
@@ -140,7 +141,6 @@ int insertdbgo_index(file_index_cache_t *item, sqlite3_stmt *res) {
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@osstext2"), item->ed.osstext2, -1, SQLITE_STATIC);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@pinode"), item->ed.pinodec, -1, SQLITE_STATIC);
 
-    sqlite3_free(zino);
     if (item->file_pattern) {
         sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@ownerID"), item->file_pattern->owner_id);
         sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@entryID"), item->file_pattern->entry_id, -1,
