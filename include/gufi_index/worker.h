@@ -7,7 +7,6 @@
 #include "app.h"
 #include "reader.h"
 
-#define MAX_BUFFER_SIZE     (1024*1024*4)
 #define EVENT_TYPE_MAX      (18)
 
 extern app_t app;

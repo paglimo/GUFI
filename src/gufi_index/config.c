@@ -101,9 +101,5 @@ void log_print(LogLevel level, const char *file, int line, const char *fmt, ...)
     vfprintf(stderr, fmt, args);
     va_end(args);
 
-    if (errno != 0) {
-        fprintf(stderr, ": %s", strerror(errno));
-    }
-
     fprintf(stderr, "\n");
 }

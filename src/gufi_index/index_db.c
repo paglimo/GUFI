@@ -5,34 +5,8 @@
 #include "external.h"
 #include "dbutils.h"
 
-const char INDEX_ENTRIES_CREATE[] =
-        DROP_TABLE(INDEX_ENTRIES)
-        INDEX_ENTRIES_SCHEMA(INDEX_ENTRIES, "");
-
-const char INDEX_ENTRIES_INSERT[] =
-        "INSERT OR REPLACE INTO " INDEX_ENTRIES " ("
-        "name, type, inode, mode, nlink, uid, gid, size, blksize, blocks, "
-        "atime, mtime, ctime, linkname, xattr_names, crtime, "
-        "ossint1, ossint2, ossint3, ossint4, osstext1, osstext2, "
-        "pinode, ownerID, entryID, parentID, entryType, featureFlag, "
-        "stripe_pattern_type, chunk_size, num_targets, target_info"
-        ") VALUES ("
-        "@name, @type, @inode, @mode, @nlink, @uid, @gid, @size, @blksize, @blocks, "
-        "@atime, @mtime, @ctime, @linkname, @xattr_names, @crtime, "
-        "@ossint1, @ossint2, @ossint3, @ossint4, @osstext1, @osstext2, "
-        "@pinode, @ownerID, @entryID, @parentID, @entryType, @featureFlag, "
-        "@stripe_pattern_type, @chunk_size, @num_targets, @target_info"
-        ");";
-
-
-const char INDEX_ENTRIES_UPDATE[] =
-        "UPDATE " INDEX_ENTRIES
-        " SET size = ?, blocks = ?, blksize = ?, inode = ?, nlink = ?, mode = ?, uid = ?, gid = ?, atime = ?, mtime = ?, ctime = ? WHERE entryID = ?;";
-
-const char INDEX_ENTRIES_DELETE[] = "DELETE FROM " ENTRIES " WHERE entryID = ?;";
-
 int create_index_db_tables(const char *name, sqlite3 *db, void *args) {
-    return ((create_table_wrapper(name, db, INDEX_ENTRIES, INDEX_ENTRIES_CREATE) != SQLITE_OK) ||
+    return ((create_table_wrapper(name, db, ENTRIES, ENTRIES_CREATE) != SQLITE_OK) ||
             (create_table_wrapper(name, db, SUMMARY, SUMMARY_CREATE) != SQLITE_OK) ||
             (create_table_wrapper(name, db, VRSUMMARY, VRSUMMARY_CREATE) != SQLITE_OK) ||
             (create_table_wrapper(name, db, PENTRIES_ROLLUP, PENTRIES_ROLLUP_CREATE) != SQLITE_OK) ||
@@ -140,9 +114,11 @@ int insertsumdb_index(sqlite3 *sdb, const char *path, struct entry_data *ed, str
 }
 
 int insertdbgo_index(file_index_cache_t *item, sqlite3_stmt *res) {
+    char *zino = sqlite3_mprintf("%" PRIu64, item->ed.statuso.st_ino);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@name"), item->file_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@type"), &item->ed.type, 1, SQLITE_STATIC);
-    sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@inode"), item->ed.pinodec, -1, SQLITE_STATIC);
+    // FIXME: wrong inode num like 1.55088371704356e+19
+    sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@inode"), zino, -1, SQLITE_STATIC);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@mode"), item->ed.statuso.st_mode);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@nlink"), item->ed.statuso.st_nlink);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@uid"), item->ed.statuso.st_uid);
@@ -164,6 +140,7 @@ int insertdbgo_index(file_index_cache_t *item, sqlite3_stmt *res) {
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@osstext2"), item->ed.osstext2, -1, SQLITE_STATIC);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@pinode"), item->ed.pinodec, -1, SQLITE_STATIC);
 
+    sqlite3_free(zino);
     if (item->file_pattern) {
         sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@ownerID"), item->file_pattern->owner_id);
         sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@entryID"), item->file_pattern->entry_id, -1,

@@ -145,6 +145,7 @@ void uninit_app() {
     pthread_mutex_destroy(&app.index_cache_mutex);
 
 
+    LOG_INFO("Shutting down...-%lld",app.insert_count);
     free_config(&app.config);
 }
 

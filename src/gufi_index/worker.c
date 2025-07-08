@@ -484,34 +484,86 @@ struct fs_event *dequeue() {
 }
 
 void receive_event(int socket_fd) {
-    char buffer[MAX_BUFFER_SIZE];
+    static char recv_buffer[RECV_BUF_CAPACITY];
+    static size_t recv_buffer_len = 0;
 
     while (1) {
-        ssize_t bytes_received = recv(socket_fd, buffer, MAX_BUFFER_SIZE, 0);
+        ssize_t bytes_received = recv(socket_fd,
+                                      recv_buffer + recv_buffer_len,
+                                      RECV_BUF_CAPACITY - recv_buffer_len,
+                                      0);
+
         if (bytes_received < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                break;
             LOG_ERR("receive failed");
             close(socket_fd);
             break;
         }
+
         if (bytes_received == 0) {
-            LOG_INFO("client disconnected: %d\n", socket_fd);
+            LOG_INFO("client disconnected: %d", socket_fd);
             epoll_ctl(app.epoll_fd, EPOLL_CTL_DEL, socket_fd, NULL);
             close(socket_fd);
             break;
         }
 
-        struct fs_event *event = malloc(sizeof(struct fs_event));
-        ReadErrorCode status = packet_to_event(buffer, 1024, event);
-        if (status == Success) {
-            if (log_level >= LOG_LEVEL_DEBUG) {
-                char *event_str = event_to_str(event);
-                LOG_DBG(event_str);
-                free(event_str);
+        recv_buffer_len += bytes_received;
+        LOG_DBG("Received %zd bytes, total in buffer: %zu", bytes_received, recv_buffer_len);
+
+        size_t offset = 0;
+
+        while (recv_buffer_len - offset >= PACKET_HEADER_LEN) {
+            if (memcmp(recv_buffer + offset, MAGIC_HEADER, MAGIC_HEADER_LEN) != 0) {
+                LOG_ERR("Invalid magic header, skipping one byte");
+                offset += 1;
+                continue;
             }
-            enqueue(event);
-        } else {
-            LOG_DBG("failed to phase packet to event");
+
+
+            uint64_t payload_len = 0;
+            memcpy(&payload_len, recv_buffer + offset + MAGIC_HEADER_LEN, LENGTH_PREFIX_LEN);
+
+            size_t total_packet_len = PACKET_HEADER_LEN + payload_len;
+            if (payload_len > RECV_BUF_CAPACITY - PACKET_HEADER_LEN) {
+                LOG_ERR("payload too large, discarding");
+                break;
+            }
+
+            if (recv_buffer_len - offset < total_packet_len) {
+                break;
+            }
+
+            struct fs_event *event = malloc(sizeof(struct fs_event));
+            if (!event) {
+                LOG_ERR("malloc failed");
+                break;
+            }
+
+            ReadErrorCode status = packet_to_event(recv_buffer + offset + PACKET_HEADER_LEN, payload_len, event);
+
+            if (status == Success) {
+                if (log_level >= LOG_LEVEL_DEBUG) {
+                    char *event_str = event_to_str(event);
+                    free(event_str);
+                }
+                enqueue(event);
+                offset += total_packet_len;
+            } else {
+                free(event);
+                LOG_ERR("failed to parse event");
+                break;
+            }
+        }
+
+        if (offset > 0) {
+            recv_buffer_len -= offset;
+            memmove(recv_buffer, recv_buffer + offset, recv_buffer_len);
+        }
+
+        if (recv_buffer_len == RECV_BUF_CAPACITY) {
+            LOG_ERR("buffer overflow, discarding %zu bytes", recv_buffer_len);
+            recv_buffer_len = 0;
         }
     }
 }
@@ -525,16 +577,16 @@ void dir_cache_flush(dir_index_cache_t *dir) {
         dir->db = opendb(db_path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, NULL, NULL);
     }
 
-    int rc = sqlite3_prepare_v2(dir->db, INDEX_ENTRIES_INSERT, -1, &dir->stmt_insert,NULL);
+    int rc = sqlite3_prepare_v2(dir->db, ENTRIES_INSERT, -1, &dir->stmt_insert,NULL);
     if (rc != SQLITE_OK) {
         LOG_ERR("sqlite3_prepare_v2 insert entry failed: %s, path %s", sqlite3_errmsg(dir->db), dir->index_path);
     }
 
-    rc = sqlite3_prepare_v2(dir->db, INDEX_ENTRIES_UPDATE, -1, &dir->stmt_update, NULL);
+    rc = sqlite3_prepare_v2(dir->db, ENTRIES_UPDATE, -1, &dir->stmt_update, NULL);
     if (rc != SQLITE_OK) {
         LOG_ERR("sqlite3_prepare_v2 update entry failed: %s", sqlite3_errmsg(dir->db));
     }
-    rc = sqlite3_prepare_v2(dir->db, INDEX_ENTRIES_DELETE, -1, &dir->stmt_delete, NULL);
+    rc = sqlite3_prepare_v2(dir->db, ENTRIES_DELETE, -1, &dir->stmt_delete, NULL);
     if (rc != SQLITE_OK) {
         LOG_ERR("sqlite3_prepare_v2 delete entry failed: %s", sqlite3_errmsg(dir->db));
     }

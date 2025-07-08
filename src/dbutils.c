@@ -89,11 +89,30 @@ const char READDIRPLUS_INSERT[] =
     "INSERT INTO " READDIRPLUS " VALUES (@path, @type, @inode, @pinode, @suspect);";
 
 const char ENTRIES_CREATE[] =
-    DROP_TABLE(ENTRIES)
-    ENTRIES_SCHEMA(ENTRIES, "");
+        DROP_TABLE(ENTRIES)
+        ENTRIES_SCHEMA(ENTRIES, "");
 
 const char ENTRIES_INSERT[] =
-    "INSERT INTO " ENTRIES " VALUES (@name, @type, @inode, @mode, @nlink, @uid, @gid, @size, @blksize, @blocks, @atime, @mtime, @ctime, @linkname, @xattr_names, @crtime, @ossint1, @ossint2, @ossint3, @ossint4, @osstext1, @osstext2);";
+        "INSERT OR REPLACE INTO " ENTRIES " ("
+        "name, type, inode, mode, nlink, uid, gid, size, blksize, blocks, "
+        "atime, mtime, ctime, linkname, xattr_names, crtime, "
+        "ossint1, ossint2, ossint3, ossint4, osstext1, osstext2, "
+        "pinode, ownerID, entryID, parentID, entryType, featureFlag, "
+        "stripe_pattern_type, chunk_size, num_targets, target_info"
+        ") VALUES ("
+        "@name, @type, @inode, @mode, @nlink, @uid, @gid, @size, @blksize, @blocks, "
+        "@atime, @mtime, @ctime, @linkname, @xattr_names, @crtime, "
+        "@ossint1, @ossint2, @ossint3, @ossint4, @osstext1, @osstext2, "
+        "@pinode, @ownerID, @entryID, @parentID, @entryType, @featureFlag, "
+        "@stripe_pattern_type, @chunk_size, @num_targets, @target_info"
+        ");";
+
+
+const char ENTRIES_UPDATE[] =
+        "UPDATE " ENTRIES
+        " SET size = ?, blocks = ?, blksize = ?, inode = ?, nlink = ?, mode = ?, uid = ?, gid = ?, atime = ?, mtime = ?, ctime = ? WHERE entryID = ?;";
+
+const char ENTRIES_DELETE[] = "DELETE FROM " ENTRIES " WHERE entryID = ?;";
 
 const char SUMMARY_CREATE[] =
     DROP_TABLE(SUMMARY)
@@ -115,13 +134,123 @@ const char PENTRIES_ROLLUP_INSERT[] =
 
 const char PENTRIES_CREATE[] =
     DROP_VIEW(PENTRIES)
-    "CREATE VIEW " PENTRIES " AS SELECT " ENTRIES ".*, " SUMMARY ".inode AS pinode, " SUMMARY ".pinode AS ppinode FROM " ENTRIES ", " SUMMARY " WHERE isroot == 1 UNION SELECT * FROM " PENTRIES_ROLLUP ";";
+    "CREATE VIEW " PENTRIES " AS "
+    "SELECT "
+        "e.name, e.type, e.inode, e.mode, e.nlink, e.uid, e.gid, e.size, "
+        "e.blksize, e.blocks, e.atime, e.mtime, e.ctime, e.linkname, "
+        "e.xattr_names, e.crtime, e.ossint1, e.ossint2, e.ossint3, e.ossint4, "
+        "e.osstext1, e.osstext2, "
+        "s.inode AS pinode, "  // +1
+        "NULL AS ownerID, NULL AS entryID, NULL AS parentID, NULL AS entryType, " // +4
+        "NULL AS featureFlag, NULL AS stripe_pattern_type, NULL AS chunk_size, "  // +3
+        "NULL AS num_targets, NULL AS target_info, "                              // +2
+        "s.pinode AS ppinode " // +1 → total: 32 + 2 = 34
+    "FROM " ENTRIES " AS e, " SUMMARY " AS s WHERE s.isroot == 1 "
+
+    "UNION "
+
+    "SELECT "
+        "name, type, inode, mode, nlink, uid, gid, size, "
+        "blksize, blocks, atime, mtime, ctime, linkname, "
+        "xattr_names, crtime, ossint1, ossint2, ossint3, ossint4, "
+        "osstext1, osstext2, "
+        "pinode, "
+        "NULL, NULL, NULL, NULL, "       // ownerID, entryID, parentID, entryType
+        "NULL, NULL, NULL, "             // featureFlag, stripe_pattern_type, chunk_size
+        "NULL, NULL, "                   // num_targets, target_info
+        "ppinode "
+    "FROM " PENTRIES_ROLLUP ";";
 
 /* vrentries is not created because rolled up entries tables are not correct */
 
 const char VRPENTRIES_CREATE[] =
     DROP_VIEW(VRPENTRIES)
-    "CREATE VIEW " VRPENTRIES " AS SELECT REPLACE(" VRSUMMARY ".name, RTRIM(" VRSUMMARY ".name, REPLACE(" VRSUMMARY ".name, '/', '')), '') AS dname, " VRSUMMARY ".name AS sname, " VRSUMMARY ".mode AS dmode, " VRSUMMARY ".nlink AS dnlink, " VRSUMMARY ".uid AS duid, " VRSUMMARY ".gid AS dgid, " VRSUMMARY ".size AS dsize, " VRSUMMARY ".blksize AS dblksize, " VRSUMMARY ".blocks AS dblocks, " VRSUMMARY ".atime AS datime, " VRSUMMARY ".mtime AS dmtime, " VRSUMMARY ".ctime AS dctime, " VRSUMMARY ".linkname AS dlinkname, " VRSUMMARY ".totfiles AS dtotfile, " VRSUMMARY ".totlinks AS dtotlinks, " VRSUMMARY ".minuid AS dminuid, " VRSUMMARY ".maxuid AS dmaxuid, " VRSUMMARY ".mingid AS dmingid, " VRSUMMARY ".maxgid AS dmaxgid, " VRSUMMARY ".minsize AS dminsize, " VRSUMMARY ".maxsize AS dmaxsize, " VRSUMMARY ".totzero AS dtotzero, " VRSUMMARY ".totltk AS dtotltk, " VRSUMMARY ".totmtk AS dtotmtk, " VRSUMMARY ".totltm AS totltm, " VRSUMMARY ".totmtm AS dtotmtm, " VRSUMMARY ".totmtg AS dtotmtg, " VRSUMMARY ".totmtt AS dtotmtt, " VRSUMMARY ".totsize AS dtotsize, " VRSUMMARY ".minctime AS dminctime, " VRSUMMARY ".maxctime AS dmaxctime, " VRSUMMARY ".minmtime AS dminmtime, " VRSUMMARY ".maxmtime AS dmaxmtime, " VRSUMMARY ".minatime AS dminatime, " VRSUMMARY ".maxatime AS dmaxatime, " VRSUMMARY ".minblocks AS dminblocks, " VRSUMMARY ".maxblocks AS dmaxblocks, " VRSUMMARY ".totxattr AS dtotxattr, " VRSUMMARY ".depth AS ddepth, " VRSUMMARY ".mincrtime AS dmincrtime, " VRSUMMARY ".maxcrtime AS dmaxcrtime, " VRSUMMARY ".rollupscore AS sroll, " VRSUMMARY ".isroot AS atroot, " VRSUMMARY ".srollsubdirs AS srollsubdirs, " PENTRIES ".* FROM " VRSUMMARY ", " PENTRIES " WHERE " VRSUMMARY ".inode == " PENTRIES ".pinode;";
+    "CREATE VIEW " VRPENTRIES " AS "
+    "SELECT "
+        "REPLACE(" VRSUMMARY ".name, RTRIM(" VRSUMMARY ".name, REPLACE(" VRSUMMARY ".name, '/', '')), '') AS dname, "
+        VRSUMMARY ".name AS sname, "
+        VRSUMMARY ".mode AS dmode, "
+        VRSUMMARY ".nlink AS dnlink, "
+        VRSUMMARY ".uid AS duid, "
+        VRSUMMARY ".gid AS dgid, "
+        VRSUMMARY ".size AS dsize, "
+        VRSUMMARY ".blksize AS dblksize, "
+        VRSUMMARY ".blocks AS dblocks, "
+        VRSUMMARY ".atime AS datime, "
+        VRSUMMARY ".mtime AS dmtime, "
+        VRSUMMARY ".ctime AS dctime, "
+        VRSUMMARY ".linkname AS dlinkname, "
+        VRSUMMARY ".totfiles AS dtotfile, "
+        VRSUMMARY ".totlinks AS dtotlinks, "
+        VRSUMMARY ".minuid AS dminuid, "
+        VRSUMMARY ".maxuid AS dmaxuid, "
+        VRSUMMARY ".mingid AS dmingid, "
+        VRSUMMARY ".maxgid AS dmaxgid, "
+        VRSUMMARY ".minsize AS dminsize, "
+        VRSUMMARY ".maxsize AS dmaxsize, "
+        VRSUMMARY ".totzero AS dtotzero, "
+        VRSUMMARY ".totltk AS dtotltk, "
+        VRSUMMARY ".totmtk AS dtotmtk, "
+        VRSUMMARY ".totltm AS dtotltm, "
+        VRSUMMARY ".totmtm AS dtotmtm, "
+        VRSUMMARY ".totmtg AS dtotmtg, "
+        VRSUMMARY ".totmtt AS dtotmtt, "
+        VRSUMMARY ".totsize AS dtotsize, "
+        VRSUMMARY ".minctime AS dminctime, "
+        VRSUMMARY ".maxctime AS dmaxctime, "
+        VRSUMMARY ".minmtime AS dminmtime, "
+        VRSUMMARY ".maxmtime AS dmaxmtime, "
+        VRSUMMARY ".minatime AS dminatime, "
+        VRSUMMARY ".maxatime AS dmaxatime, "
+        VRSUMMARY ".minblocks AS dminblocks, "
+        VRSUMMARY ".maxblocks AS dmaxblocks, "
+        VRSUMMARY ".totxattr AS dtotxattr, "
+        VRSUMMARY ".depth AS ddepth, "
+        VRSUMMARY ".mincrtime AS dmincrtime, "
+        VRSUMMARY ".maxcrtime AS dmaxcrtime, "
+        VRSUMMARY ".rollupscore AS sroll, "
+        VRSUMMARY ".isroot AS atroot, "
+        VRSUMMARY ".srollsubdirs AS srollsubdirs, "
+
+        /* pentries 显式列出，避免 name 冲突，保留 fname、name 兼容字段 */
+        PENTRIES ".name AS fname, "
+        PENTRIES ".name AS name, "
+        PENTRIES ".type, "
+        PENTRIES ".inode, "
+        PENTRIES ".mode, "
+        PENTRIES ".nlink, "
+        PENTRIES ".uid, "
+        PENTRIES ".gid, "
+        PENTRIES ".size, "
+        PENTRIES ".blksize, "
+        PENTRIES ".blocks, "
+        PENTRIES ".atime, "
+        PENTRIES ".mtime, "
+        PENTRIES ".ctime, "
+        PENTRIES ".linkname, "
+        PENTRIES ".xattr_names, "
+        PENTRIES ".crtime, "
+        PENTRIES ".ossint1, "
+        PENTRIES ".ossint2, "
+        PENTRIES ".ossint3, "
+        PENTRIES ".ossint4, "
+        PENTRIES ".osstext1, "
+        PENTRIES ".osstext2, "
+        PENTRIES ".pinode, "
+        PENTRIES ".ownerID, "
+        PENTRIES ".entryID, "
+        PENTRIES ".parentID, "
+        PENTRIES ".entryType, "
+        PENTRIES ".featureFlag, "
+        PENTRIES ".stripe_pattern_type, "
+        PENTRIES ".chunk_size, "
+        PENTRIES ".num_targets, "
+        PENTRIES ".target_info, "
+        PENTRIES ".ppinode "
+
+    "FROM " VRSUMMARY ", " PENTRIES " "
+    "WHERE " VRSUMMARY ".inode = " PENTRIES ".pinode;";
+
 
 const char TREESUMMARY_EXISTS[] =
     "SELECT name FROM sqlite_master WHERE (type == 'table') AND (name == '" TREESUMMARY "');";

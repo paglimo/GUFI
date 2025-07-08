@@ -9,7 +9,13 @@
 // sizeof(fs_event) = 8992, should make sure buffer size > fs_event size
 #define MAX_BUFFER_SIZE (1024*1024*4)
 
-#define EVENT_HEADER_SIZE 8
+#define EVENT_HEADER_MAGIC "START"
+#define EVENT_HEADER_SIZE 4
+#define RECV_BUF_CAPACITY 65536  // 可调，根据需要
+#define MAGIC_HEADER "STAR"
+#define MAGIC_HEADER_LEN 4
+#define LENGTH_PREFIX_LEN 8
+#define PACKET_HEADER_LEN (MAGIC_HEADER_LEN + LENGTH_PREFIX_LEN)
 
 typedef enum {
 	Success,

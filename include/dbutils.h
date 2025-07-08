@@ -100,11 +100,48 @@ extern const char READDIRPLUS_INSERT[];
 
 /* contains all file and link metadata for the current directory */
 /* prefer pentries over entries */
-#define ENTRIES           "entries"
-#define ENTRIES_SCHEMA(name, extra_cols)            \
-    "CREATE TABLE " name "(" extra_cols "name TEXT, type TEXT, inode TEXT, mode INT64, nlink INT64, uid INT64, gid INT64, size INT64, blksize INT64, blocks INT64, atime INT64, mtime INT64, ctime INT64, linkname TEXT, xattr_names BLOB, crtime INT64, ossint1 INT64, ossint2 INT64, ossint3 INT64, ossint4 INT64, osstext1 TEXT, osstext2 TEXT);"
 extern const char ENTRIES_CREATE[];
 extern const char ENTRIES_INSERT[];
+extern const char ENTRIES_UPDATE[];
+extern const char ENTRIES_DELETE[];
+
+#define ENTRIES           "entries"
+#define ENTRIES_SCHEMA(name, extra_cols) \
+"CREATE TABLE " name " (" \
+extra_cols \
+"name TEXT,\n" \
+"type TEXT,\n" \
+"inode TEXT,\n" \
+"mode INT64,\n" \
+"nlink INT64,\n" \
+"uid INT64,\n" \
+"gid INT64,\n" \
+"size INT64,\n" \
+"blksize INT64,\n" \
+"blocks INT64,\n" \
+"atime INT64,\n" \
+"mtime INT64,\n" \
+"ctime INT64,\n" \
+"linkname TEXT,\n" \
+"xattr_names BLOB,\n" \
+"crtime INT64,\n" \
+"ossint1 INT64,\n" \
+"ossint2 INT64,\n" \
+"ossint3 INT64,\n" \
+"ossint4 INT64,\n" \
+"osstext1 TEXT,\n" \
+"osstext2 TEXT,\n" \
+"pinode TEXT,\n" \
+"ownerID INT64,\n" \
+"entryID TEXT,\n" \
+"parentID TEXT,\n" \
+"entryType INT64,\n" \
+"featureFlag INT64,\n" \
+"stripe_pattern_type INT64,\n" \
+"chunk_size INT64,\n" \
+"num_targets INT64,\n" \
+"target_info TEXT\n" \
+");"
 
 extern const char SUMMARY_INSERT[];
 /* directory metadata + aggregate data */
