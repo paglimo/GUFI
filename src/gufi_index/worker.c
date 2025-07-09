@@ -29,7 +29,7 @@ static event_handler_t handler_table[EVENT_TYPE_MAX] = {
 
     [MKDIR] = create_dir,
     [RMDIR] = remove_dir,
-    [RENAME] = move_file,
+    [RENAME] = rename_event,
 
     [FLUSH] = NULL,
     [OPEN_READ] = NULL,
@@ -157,6 +157,9 @@ int update_cache_data_flag(int old_flag, fs_event_type event_type) {
     }
     if (event_type == SETATTR || event_type == CLOSE_WRITE || event_type == TRUNCATE) {
         return old_flag | DATA_FIELD_STAT;
+    }
+    if (event_type == UNLINK) {
+        return DATA_FIELD_DELETE;
     }
     return old_flag;
 }
@@ -340,7 +343,100 @@ void remove_dir(struct fs_event *event) {
     rmdir_iterative(index_path);
 }
 
-void move_file(struct fs_event *event) {
+void rename_event(struct fs_event *event) {
+    char source_path[MAXPATH], dest_path[MAXPATH];
+    char source_index_path[MAXPATH], dest_index_path[MAXPATH];
+    SNPRINTF(source_index_path, sizeof(source_index_path), "%s%s", app.config.index_root, event->path);
+    SNPRINTF(dest_index_path, sizeof(dest_index_path), "%s%s", app.config.index_root, event->targetPath);
+    SNPRINTF(source_path, sizeof(source_path), "%s%s", app.config.mount_point, event->path);
+    SNPRINTF(dest_path, sizeof(dest_path), "%s%s", app.config.mount_point, event->targetPath);
+    LOG_DBG("rename event: %s -> %s\n", source_path, dest_path);
+
+    struct stat st;
+    int rc = lstat(dest_path, &st);
+    if (rc != 0) {
+        fprintf(stderr, "Failed to stat \"%s\": %s\n", dest_path, strerror(errno));
+        return;
+    }
+
+    char old_parent[MAXPATH], new_parent[MAXPATH];
+    char new_name[MAXPATH], old_name[MAXPATH];
+    char old_db_prefix[MAXPATH], new_db_prefix[MAXPATH];
+    char old_db_path[MAXPATH], new_db_path[MAXPATH];
+    shortpath(dest_path, old_parent, new_name);
+    shortpath(source_path, new_parent, old_name);
+    shortpath(source_index_path, old_db_prefix, old_name);
+    shortpath(dest_index_path, new_db_prefix, new_name);
+    SNPRINTF(old_db_path, sizeof(old_db_path), "%s/%s", old_db_prefix, DBNAME);
+    SNPRINTF(new_db_path, sizeof(new_db_path), "%s/%s", new_db_prefix, DBNAME);
+    bool same_parent = strcmp(old_parent, new_parent) == 0;
+
+    /*
+     * move directory from source path to dest path
+     * 1. update related summary table for their parent directory.
+     * 2. do directory movement in index dir too
+     */
+    if (S_ISDIR(st.st_mode)) {
+        rc = rename(source_index_path, dest_index_path);
+        if (rc != 0) {
+            fprintf(stderr, "failed to do rename in index directory, error: rc %d\n", rc);
+        }
+    }
+    /*
+     * rename file from source path to dest path
+     * 1. in same directory, just rename the name in database;
+     * 2. in different directory, delete the source path in database and insert the dest path in database.
+     */
+    else {
+        if (same_parent) {
+            printf("rename in the same directory\n");
+            sqlite3 *db = opendb(new_db_path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 1, 0, NULL, NULL);
+            const char *sql = "UPDATE entries SET name = ? WHERE name = ?;";
+            sqlite3_stmt *stmt;
+
+            rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+            if (rc != SQLITE_OK) {
+                fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+                return;
+            }
+
+            // Bind parameters
+            sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, old_name, -1, SQLITE_STATIC);
+
+            // Execute the statement
+            rc = sqlite3_step(stmt);
+            if (rc != SQLITE_DONE) {
+                fprintf(stderr, "Failed to execute update: %s\n", sqlite3_errmsg(db));
+            }
+
+            // Finalize the statement
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+        /*
+         * 1. do unlink for old database
+         * 2. do create for new database
+         */
+        else {
+            struct fs_event *unlink = malloc(sizeof(struct fs_event));
+
+            unlink->type = UNLINK;
+            strcpy(unlink->path, event->path);
+            strcpy(unlink->entryId, event->entryId);
+            strcpy(unlink->parentEntryId, event->parentEntryId);
+            cache_event(unlink);
+            free(unlink);
+
+            struct fs_event *create = malloc(sizeof(struct fs_event));
+            create->type = CREATE;
+            strcpy(create->path, event->targetPath);
+            strcpy(create->entryId, event->entryId);
+            strcpy(create->parentEntryId, event->targetParentId);
+            cache_event(create);
+            free(create);
+        }
+    }
 }
 
 void process_event(struct fs_event *event) {
@@ -460,10 +556,6 @@ void receive_event(int socket_fd) {
             ReadErrorCode status = packet_to_event(recv_buffer + offset + PACKET_HEADER_LEN, payload_len, event);
 
             if (status == Success) {
-                if (log_level >= LOG_LEVEL_DEBUG) {
-                    char *event_str = event_to_str(event);
-                    free(event_str);
-                }
                 enqueue(event);
                 offset += total_packet_len;
             } else {

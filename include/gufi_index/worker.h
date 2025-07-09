@@ -42,7 +42,7 @@ void create_dir(struct fs_event *event);
 
 void remove_dir(struct fs_event *event);
 
-void move_file(struct fs_event *event);
+void rename_event(struct fs_event *event);
 
 void process_event(struct fs_event *event);
 
