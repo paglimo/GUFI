@@ -324,7 +324,7 @@ def run(argv, config_path):
                 '{0} {1}'.format(column, type)
                 for column, type in zip(columns, # pylint: disable=redefined-builtin
                                         [
-                                            'TEXT', 'TEXT', 'TEXT', 'INT64', 'INT64', 'INT64',
+                                            'TEXT', 'TEXT', 'TEXT', 'TEXT', 'INT64', 'INT64',
                                             'INT64', 'INT64', 'INT64', 'INT64', 'INT64', 'INT64',
                                             'INT64', 'INT64', 'TEXT', 'TEXT', 'INT64'
                                         ]

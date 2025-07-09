@@ -118,7 +118,6 @@ int insertdbgo_index(file_index_cache_t *item, sqlite3_stmt *res) {
     snprintf(inode_str, sizeof(inode_str), "%" PRIu64, item->ed.statuso.st_ino);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@name"), item->file_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@type"), &item->ed.type, 1, SQLITE_STATIC);
-    // FIXME: wrong inode num like 1.55088371704356e+19
     sqlite3_bind_text(res, sqlite3_bind_parameter_index(res, "@inode"), inode_str, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@mode"), item->ed.statuso.st_mode);
     sqlite3_bind_int64(res, sqlite3_bind_parameter_index(res, "@nlink"), item->ed.statuso.st_nlink);

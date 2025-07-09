@@ -361,29 +361,6 @@ void process_event(struct fs_event *event) {
     } else {
         LOG_DBG("Ignored or unknown event: %d (%s)\n", event->type, type);
     }
-    switch (event->type) {
-        case CREATE:
-        case SYMLINK:
-        case HARDLINK:
-        case MKNOD:
-        case TRUNCATE:
-        case SETATTR:
-        case CLOSE_WRITE:
-
-            break;
-
-        case MKDIR:
-        case RMDIR:
-        case RENAME:
-            if (handler) {
-                handler(event);
-            }
-            break;
-
-        default:
-
-            LOG_DBG("event type %s not supported, ignored", type);
-    }
 }
 
 void set_nonblocking(int sockfd) {
