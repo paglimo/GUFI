@@ -208,9 +208,10 @@ int delete_index(file_index_cache_t *item, sqlite3_stmt *res) {
     sqlite3_bind_text(res, 1, item->entry_id, -1, SQLITE_STATIC);
     int rc = sqlite3_step(res);
     if (rc != SQLITE_DONE) {
-        fprintf(stderr, "deleted\n");
+        LOG_ERR("sqlite3_step, rc %d, %s",rc, sqlite3_errstr(rc));
         return rc;
     }
     sqlite3_reset(res);
+    sqlite3_clear_bindings(res);
     return SQLITE_OK;
 }

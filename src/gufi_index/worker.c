@@ -12,10 +12,9 @@
 #include <sys/epoll.h>
 #include <netinet/in.h>
 #include "dbutils.h"
-#include "external.h"
 #include "utils.h"
-#include <libgen.h>
-#include <string.h>
+
+#define MAX_FLUSH_PER_ROUND 100000
 
 static event_handler_t handler_table[EVENT_TYPE_MAX] = {
     [CREATE] = cache_event,
@@ -153,9 +152,12 @@ void clear_cache_dir() {
 
 int update_cache_data_flag(int old_flag, fs_event_type event_type) {
     if (event_type == CREATE || event_type == SYMLINK || event_type == HARDLINK || event_type == MKNOD) {
-        return old_flag | DATA_FIELD_INSERT;
+        return DATA_FIELD_INSERT;
     }
     if (event_type == SETATTR || event_type == CLOSE_WRITE || event_type == TRUNCATE) {
+        if (old_flag & DATA_FIELD_INSERT) {
+            return old_flag;
+        }
         return old_flag | DATA_FIELD_STAT;
     }
     if (event_type == UNLINK) {
@@ -447,12 +449,8 @@ void process_event(struct fs_event *event) {
     }
 
     const char *type = event_type_string(event);
-    LOG_DBG("event %s path %s, id %s parent id %s", type, event->path, event->parentEntryId,
-            event->entryId);
-
     event_handler_t handler = handler_table[event->type];
     if (handler) {
-        LOG_DBG("processing event %s", type);
         handler(event);
     } else {
         LOG_DBG("Ignored or unknown event: %d (%s)\n", event->type, type);
@@ -521,10 +519,8 @@ void receive_event(int socket_fd) {
         }
 
         recv_buffer_len += bytes_received;
-        LOG_DBG("Received %zd bytes, total in buffer: %zu", bytes_received, recv_buffer_len);
 
         size_t offset = 0;
-
         while (recv_buffer_len - offset >= PACKET_HEADER_LEN) {
             if (memcmp(recv_buffer + offset, MAGIC_HEADER, MAGIC_HEADER_LEN) != 0) {
                 LOG_ERR("Invalid magic header, skipping one byte");
@@ -579,14 +575,18 @@ void receive_event(int socket_fd) {
 
 void dir_cache_flush(dir_index_cache_t *dir) {
     pthread_mutex_lock(&dir->mutex);
-
-    startdb(dir->db);
+    size_t flush_count = 0;
     file_index_cache_t *item, *tmp;
+
+NEXT_ROUND:
     HASH_ITER(hh, dir->file_cache, item, tmp) {
         if (item->data_field_flag & DATA_FIELD_INSERT) {
             update_file_stat(item);
             item->file_pattern = get_file_pattern(item->file_path, item->entry_id, item->parent_id);
-            insertdbgo_index(item, dir->stmt_insert);
+            int rc = insertdbgo_index(item, dir->stmt_insert);
+            if (rc != SQLITE_OK) {
+                LOG_ERR("insert failed: %s (rc=%d)", item->file_path, rc);
+            }
         } else if (item->data_field_flag & DATA_FIELD_STAT) {
             update_file_stat(item);
             update_attr_index(item, dir->stmt_update);
@@ -596,6 +596,14 @@ void dir_cache_flush(dir_index_cache_t *dir) {
         HASH_DEL(dir->file_cache, item);
         file_cache_uninit(item);
         free(item);
+
+        flush_count++;
+        if (flush_count == MAX_FLUSH_PER_ROUND) {
+            stopdb(dir->db);
+            startdb(dir->db);
+            flush_count = 0;
+            goto NEXT_ROUND;
+        }
     }
     stopdb(dir->db);
     time(&dir->last_commit);
@@ -606,46 +614,36 @@ void *event_flusher_run(void *arg) {
     while (!app_stop) {
         pthread_mutex_lock(&app.index_cache_mutex);
         dir_index_cache_t *entry, *tmp;
-        dir_index_cache_t *still_alive = NULL;
+        dir_index_cache_t *need_flush = NULL;
         time_t current_time = time(NULL);
         HASH_ITER(hh, app.index_cache, entry, tmp) {
             if (difftime(current_time, entry->last_access) > 5) {
-                HASH_DEL(app.index_cache, entry);
-                HASH_ADD_STR(still_alive, entry_id, entry);
+                HASH_ADD_STR(need_flush, entry_id, entry);
             }
         }
         pthread_mutex_unlock(&app.index_cache_mutex);
 
-        HASH_ITER(hh, still_alive, entry, tmp) {
-            LOG_DBG("flushing cache dir %s", entry->entry_id);
+        HASH_ITER(hh, need_flush, entry, tmp) {
             dir_cache_flush(entry);
-            if (entry->ref_count == 0) {
-                LOG_DBG("removing expired cache dir %s", entry->entry_id);
-                HASH_DEL(still_alive, entry);
-                dir_cache_uinit(entry);
-                free(entry);
-            } else {
-                pthread_mutex_lock(&app.index_cache_mutex);
-                HASH_ADD_STR(app.index_cache, entry_id, entry);
-                pthread_mutex_unlock(&app.index_cache_mutex);
-                HASH_DEL(still_alive, entry);
+            if (entry->ref_count > 0) {
+                HASH_DEL(need_flush, entry);
             }
         }
 
-        // put ref_count > 0 item back
-        if (still_alive) {
+        //
+        if (need_flush) {
             pthread_mutex_lock(&app.index_cache_mutex);
-            dir_index_cache_t *e, *tmp2;
-            HASH_ITER(hh, still_alive, e, tmp2) {
-                HASH_ADD_STR(app.index_cache, entry_id, e);
-                HASH_DEL(still_alive, e);
+            HASH_ITER(hh, need_flush, entry, tmp) {
+                HASH_DEL(need_flush, entry);
+
+                if (entry->ref_count == 0) {
+                    HASH_DEL(app.index_cache, entry);
+                    dir_cache_uinit(entry);
+                    free(entry);
+                }
             }
             pthread_mutex_unlock(&app.index_cache_mutex);
         }
-
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += 5;
 
         // TODO: replace sleep with interruptable sleep
         sleep(5);
