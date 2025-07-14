@@ -127,12 +127,16 @@ void release_cached_dir(const char entryId[256]) {
     pthread_mutex_unlock(&app.index_cache_mutex);
 }
 
-void delete_cache_dir(const char entryId[256],bool flush) {
+void delete_cache_dir(const char entryId[256]) {
     pthread_mutex_lock(&app.index_cache_mutex);
     dir_index_cache_t *entry = NULL;
     HASH_FIND_STR(app.index_cache, entryId, entry);
     if (entry) {
         HASH_DEL(app.index_cache, entry);
+        pthread_mutex_unlock(&app.index_cache_mutex);
+        dir_cache_uinit(entry);
+        free(entry);
+        return;
     }
     pthread_mutex_unlock(&app.index_cache_mutex);
 }
@@ -346,8 +350,7 @@ void rmdir_iterative(const char *dir_path) {
 
 
 void remove_dir(struct fs_event *event) {
-    // check cached event and sql buffer under this directory, should clear them first
-    delete_cache_dir(event->entryId, false);
+    delete_cache_dir(event->entryId);
 
     char index_path[MAXPATH];
     SNPRINTF(index_path, sizeof(index_path), "%s%s", app.config.index_root, event->path);

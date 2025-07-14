@@ -27,7 +27,7 @@ void cache_event(struct fs_event* event);
 
 void dir_cache_flush(dir_index_cache_t *dir);
 
-void delete_cache_dir(const char entryId[256], bool flush);
+void delete_cache_dir(const char entryId[256]);
 
 void clear_cache_dir();
 
