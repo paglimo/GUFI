@@ -169,8 +169,19 @@ int update_cache_data_flag(int old_flag, fs_event_type event_type) {
 
 void cache_event(struct fs_event *event) {
     dir_index_cache_t *parent = reference_dir(event->parentEntryId, event->path, true);
-    // check file cache exist
+
+    // check directory cached event size, flush before cache if too large
     pthread_mutex_lock(&parent->mutex);
+    uint64_t cache_size = HASH_COUNT(parent->file_cache);
+    if (cache_size >= MAX_FLUSH_PER_ROUND)
+    {
+        LOG_DBG("flushing cache dir %s, cache size %lld", parent->entry_id, cache_size);
+        pthread_mutex_unlock(&parent->mutex);
+        dir_cache_flush(parent);
+        pthread_mutex_lock(&parent->mutex);
+    }
+
+    // check file cache exist
     file_index_cache_t *found = NULL;
     HASH_FIND_STR(parent->file_cache, event->entryId, found);
     if (found == NULL) {
@@ -630,7 +641,6 @@ void *event_flusher_run(void *arg) {
             }
         }
 
-        //
         if (need_flush) {
             pthread_mutex_lock(&app.index_cache_mutex);
             HASH_ITER(hh, need_flush, entry, tmp) {
